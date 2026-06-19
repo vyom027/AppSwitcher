@@ -230,7 +230,10 @@ Window {
 
             // bottom bar
             RowLayout {
-                Layout.fillWidth: true; spacing: 16
+                Layout.fillWidth: true; spacing: 14
+                Label2 { text: "Replace Alt+Tab"; color: win.text1; font.pixelSize: 14 }
+                IOSSwitch { checked: backend.altTab; onToggled: backend.altTab = v }
+                Rectangle { width: 1; height: 22; color: Qt.rgba(1,1,1,0.12) }
                 Label2 { text: "Start with Windows"; color: win.text1; font.pixelSize: 14 }
                 IOSSwitch { checked: backend.autostart; onToggled: backend.autostart = v }
                 Item { Layout.fillWidth: true }

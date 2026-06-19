@@ -18,6 +18,19 @@ import win32con
 import win32process
 from PIL import Image, ImageGrab, ImageDraw, ImageFont, ImageFilter, ImageChops
 
+# Set DPI awareness to per-monitor-v2 BEFORE Qt loads (matches Qt's default, so
+# Qt doesn't fail with "SetProcessDpiAwarenessContext: Access is denied"). Use
+# physical pixels everywhere (overlay math relies on GetSystemMetrics).
+try:
+    _setctx = ctypes.windll.user32.SetProcessDpiAwarenessContext
+    _setctx.argtypes = [ctypes.c_void_p]
+    _setctx(ctypes.c_void_p(-4))     # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
 os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
 os.environ.setdefault("QT_SCALE_FACTOR", "1")
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -41,6 +54,7 @@ SETTINGS  = {
     "sensitivity": 210,       # PICKER_STEP (lower = less finger travel per app)
     "accent":     [150, 205, 255],
     "warn_dismissed": False,  # user dismissed the 3-finger warning
+    "alt_tab":    True,       # replace Windows Alt+Tab with this switcher
 }
 
 def load_settings():
@@ -223,8 +237,7 @@ def capture_window_image(hwnd):
         except Exception: pass
 
 def screen_size():
-    user32 = ctypes.windll.user32
-    user32.SetProcessDPIAware()
+    user32 = ctypes.windll.user32   # DPI awareness already set at import
     return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
 
 def work_area():
@@ -291,6 +304,7 @@ def _reflection(card, frac=0.5, top_alpha=120):
 _app    = None
 _bridge = None
 _overlays = set()        # keep overlays alive while shown
+_alttab_ctl = [None]     # set to the stepper fn while an Alt+Tab picker is open
 
 def _pil2pix(im):
     """PIL Image -> QPixmap."""
@@ -323,6 +337,11 @@ def run_ui(open_settings=False):
     _app.setQuitOnLastWindowClosed(False)   # tray app: closing settings != quit
     _bridge = _Bridge()
     load_settings()
+    try:
+        import kbd_hook
+        kbd_hook.enabled = bool(SETTINGS.get("alt_tab", True))
+    except Exception:
+        pass
     try:
         import gui
         gui.build_tray(_app)
@@ -447,10 +466,12 @@ class SlideAnimator:
 
     # ---- slide transition between two apps -----------------------------------
     def slide_transition(self, direction, current_hwnd, next_hwnd, on_done=None,
-                         commit=True):
+                         commit=True, cur_img=None, nxt_img=None):
+        # cur_img/nxt_img: reuse already-captured images (e.g. from the picker)
+        # to skip the ~150ms re-capture so the animation starts instantly.
         wx, wy, sw, sh = work_area()
-        cur = capture_window_image(current_hwnd) or Image.new("RGB", (sw, sh), (24, 24, 28))
-        nxt = capture_window_image(next_hwnd) or Image.new("RGB", (sw, sh), (24, 24, 28))
+        cur = cur_img or capture_window_image(current_hwnd) or Image.new("RGB", (sw, sh), (24, 24, 28))
+        nxt = nxt_img or capture_window_image(next_hwnd) or Image.new("RGB", (sw, sh), (24, 24, 28))
         cur = cur.resize((sw, sh), Image.BILINEAR)
         nxt = nxt.resize((sw, sh), Image.BILINEAR)
 
@@ -490,7 +511,7 @@ class SlideAnimator:
         QtCore.QTimer.singleShot(max(80, dur) + 800, finish)
 
     # ---- picker (layout chosen from settings) --------------------------------
-    def show_picker(self, windows, current_idx, on_result):
+    def show_picker(self, windows, current_idx, on_result, mode="finger"):
         import layouts
         n = len(windows)
         if n == 0:
@@ -511,8 +532,10 @@ class SlideAnimator:
         _overlays.add(ov)
         scene = ov.scene
         scene.addPixmap(_pil2pix(get_backdrop(sw, sh))).setZValue(0)
-        hint = scene.addText("move fingers to pick   ·   lift to select   ·   Esc cancel",
-                             QtGui.QFont("Segoe UI", 10))
+        hint_txt = ("hold Alt · Tab to cycle · release Alt to switch · Esc cancel"
+                    if mode == "alttab"
+                    else "move fingers to pick   ·   lift to select   ·   Esc cancel")
+        hint = scene.addText(hint_txt, QtGui.QFont("Segoe UI", 10))
         hint.setDefaultTextColor(QtGui.QColor(225, 230, 240)); hint.setZValue(8)
         hint.setPos((sw - hint.boundingRect().width()) / 2, 14)
 
@@ -533,17 +556,43 @@ class SlideAnimator:
             if state["done"]:
                 return
             state["done"] = True
-            timer.stop(); ov.destroy_overlay(); on_result(idx)
+            _alttab_ctl[0] = None
+            timer.stop(); ov.destroy_overlay(); on_result(idx, imgs)
 
         import gesture_hook as _gh
-        VK = {"esc": 0x1B, "left": 0x25, "right": 0x27, "enter": 0x0D, "lmb": 0x01}
+        VK = {"esc": 0x1B, "left": 0x25, "right": 0x27, "enter": 0x0D,
+              "lmb": 0x01, "alt": 0x12}
         edge = {"down": False}
         fnav = {"base_x": None, "base_focus": float(current_idx), "armed": False}
+        alt_state = {"down": True}        # Alt is held when alttab picker opens
         def held(vk):
             return _u32.GetAsyncKeyState(vk) & 0x8000
 
+        # alttab mode: external stepper advances selection on each Alt+Tab
+        if mode == "alttab":
+            def _step(direction):
+                if state["done"]:
+                    return
+                state["selected"] = (state["selected"] + direction) % n
+                state["focus"] = float(state["selected"])
+                layout.update(state["focus"], state["selected"])
+            _alttab_ctl[0] = _step
+
         def poll():
             if state["done"] or ov._closed:
+                return
+            if mode == "alttab":
+                a = held(VK["alt"])
+                if not a and alt_state["down"]:      # Alt released -> commit
+                    finish(state["selected"]); return
+                alt_state["down"] = a
+                if held(VK["esc"]):
+                    finish(None); return
+                if held(VK["lmb"]):
+                    pt = ctypes.wintypes.POINT(); _u32.GetCursorPos(ctypes.byref(pt))
+                    hit = layout.hit_test(pt.x, pt.y)
+                    if hit is not None:
+                        finish(hit); return
                 return
             live = _gh.LIVE
             if live["count"] >= 2:
@@ -649,7 +698,7 @@ class AppSwitcher:
             self.refresh_windows()
             with self._lock:
                 wins = list(self.windows); cur = self.current   # foreground at 0
-            def on_result(idx):
+            def on_result(idx, imgs=None):
                 if idx is None or len(wins) < 2 or idx == cur:
                     if idx is not None:
                         with self._lock:
@@ -659,11 +708,44 @@ class AppSwitcher:
                 with self._lock:
                     self.current = idx
                 direction = 1 if idx > cur else -1
-                self.animator.slide_transition(direction, wins[cur][0],
-                                               wins[idx][0], on_done=self._release)
+                ci = imgs[cur] if imgs else None
+                ni = imgs[idx] if imgs else None
+                self.animator.slide_transition(direction, wins[cur][0], wins[idx][0],
+                                               on_done=self._release,
+                                               cur_img=ci, nxt_img=ni)
             self.animator.show_picker(wins, cur, on_result)
         except Exception as e:
             print("[picker] error:", e)
+            self._release()
+
+    def alttab(self, direction):
+        # If an Alt+Tab picker is already open, just advance its selection.
+        if _alttab_ctl[0] is not None:
+            _alttab_ctl[0](direction)
+            return
+        if not self._acquire():
+            return
+        try:
+            self.refresh_windows()
+            with self._lock:
+                wins = list(self.windows); cur = self.current   # foreground at 0
+            if len(wins) < 2:
+                self._release(); return
+            start = (cur + direction) % len(wins)   # first Tab highlights next app
+            def on_result(idx, imgs=None):
+                if idx is None or idx == cur:
+                    self._release(); return
+                with self._lock:
+                    self.current = idx
+                d = 1 if idx >= cur else -1
+                ci = imgs[cur] if imgs else None     # reuse picker captures =>
+                ni = imgs[idx] if imgs else None     # animation starts instantly
+                self.animator.slide_transition(d, wins[cur][0], wins[idx][0],
+                                               on_done=self._release,
+                                               cur_img=ci, nxt_img=ni)
+            self.animator.show_picker(wins, start, on_result, mode="alttab")
+        except Exception as e:
+            print("[alttab] error:", e)
             self._release()
 
     def preview_anim(self):
@@ -695,6 +777,10 @@ def handle_hold_swipe(direction):
 
 def handle_arm():
     post(prewarm_backdrop)
+
+def handle_alttab(direction):
+    # fired from the keyboard hook (background thread) on Alt+Tab
+    post(lambda: _switcher.alttab(direction))
 
 if __name__ == "__main__":
     print("AppSwitcher loaded. Run main.py to start.")

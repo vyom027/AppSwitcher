@@ -8,7 +8,7 @@ a = Analysis(
     binaries=[],
     datas=[('icon.ico', '.'), ('Settings.qml', '.')],
     hiddenimports=[
-        'switcher', 'layouts', 'gui', 'gesture_hook', 'qml_settings',
+        'switcher', 'layouts', 'gui', 'gesture_hook', 'qml_settings', 'kbd_hook',
         'win32gui', 'win32ui', 'win32con', 'win32process',
         'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.QtQuickControls2',
     ],

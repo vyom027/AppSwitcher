@@ -480,15 +480,22 @@ def run_message_loop():
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
-def start(on_swipe, on_hold_swipe, on_arm=None):
+def start(on_swipe, on_hold_swipe, on_arm=None, on_alttab=None):
     """
     on_swipe(direction)      — quick 3-finger swipe; direction 1=right, -1=left
     on_hold_swipe(direction) — held 3-finger swipe, same directions
     on_arm()                 — a hold looks imminent (use to pre-warm the picker)
+    on_alttab(direction)     — Alt+Tab pressed (keyboard hook); replaces Win switch
     """
     global _tracker
     _tracker = GestureTracker(on_swipe, on_hold_swipe, on_arm)
     _cb = _create_message_window()   # keep reference alive
+    if on_alttab is not None:
+        try:
+            import kbd_hook
+            kbd_hook.install(on_alttab)   # LL keyboard hook on this thread
+        except Exception as e:
+            print("[kbd_hook] install failed:", e)
     print("[gesture_hook] Listening for 3-finger touchpad gestures...")
     run_message_loop()
     return _cb

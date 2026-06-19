@@ -96,6 +96,19 @@ class Backend(QtCore.QObject):
         (main.install_startup if v else main.uninstall_startup)()
         self.changed.emit()
 
+    @QtCore.Property(bool, notify=changed)
+    def altTab(self):
+        return bool(S.SETTINGS.get("alt_tab", True))
+    @altTab.setter
+    def altTab(self, v):
+        S.SETTINGS["alt_tab"] = bool(v)
+        try:
+            import kbd_hook
+            kbd_hook.enabled = bool(v)
+        except Exception:
+            pass
+        self.changed.emit()
+
     @QtCore.Property(bool, notify=warnChanged)
     def threeFingerWarning(self):
         return self._warn and not S.SETTINGS.get("warn_dismissed", False)

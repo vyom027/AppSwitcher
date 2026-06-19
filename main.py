@@ -67,6 +67,10 @@ def main():
     if "--debug" in sys.argv:
         gesture_hook.DEBUG = True
         switcher.DEBUG = True
+        try:
+            import kbd_hook; kbd_hook.DEBUG = True
+        except Exception:
+            pass
         print("[debug] verbose tracing ON")
 
     print("=" * 50)
@@ -86,6 +90,7 @@ def main():
             on_swipe      = switcher.handle_swipe,
             on_hold_swipe = switcher.handle_hold_swipe,
             on_arm        = switcher.handle_arm,
+            on_alttab     = switcher.handle_alttab,
         )
     threading.Thread(target=listen, daemon=True).start()
 
