@@ -2,10 +2,13 @@
 ; Build: ISCC.exe installer.iss   (after PyInstaller produces dist\AppSwitcher)
 
 #define AppName "AppSwitcher"
-#define AppVersion "1.0"
+#define AppVersion "1.1"
 #define AppExe "AppSwitcher.exe"
 
 [Setup]
+; Stable AppId: lets Inno recognise an existing install and UPGRADE in place
+; (no uninstall-first). Never change this GUID across versions.
+AppId={{7A6F3C2E-9B4D-4E1A-8F2C-1D5E6A7B8C90}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher=AppSwitcher
@@ -21,6 +24,12 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
+; In-place update: detect the running app (it creates this named mutex), close
+; it via Restart Manager, copy the new files, then relaunch it. No manual
+; uninstall, no "file in use" error.
+AppMutex=AppSwitcher_Running_Mutex
+CloseApplications=force
+RestartApplications=yes
 
 [Tasks]
 Name: "startup"; Description: "Start {#AppName} automatically when Windows starts"; GroupDescription: "Startup:"

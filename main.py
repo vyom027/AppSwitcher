@@ -50,6 +50,73 @@ def check_deps():
         print("[setup] Done. Restart main.py.")
         sys.exit(0)
 
+_MUTEX_HANDLE = None
+
+def acquire_single_instance(name="AppSwitcher_Running_Mutex"):
+    """Create a named mutex; return False if another instance already holds it.
+
+    The installer's AppMutex uses this same name to detect the running app and
+    close/restart it during an in-place update — so you never have to uninstall
+    first. It also stops a duplicate background instance (e.g. the installer's
+    'launch now' firing after Restart Manager already relaunched us)."""
+    global _MUTEX_HANDLE
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        k.CreateMutexW.restype = ctypes.c_void_p
+        h = k.CreateMutexW(None, False, name)
+        if not h:
+            return True                      # can't create -> don't block startup
+        _MUTEX_HANDLE = h                    # hold for process lifetime
+        return k.GetLastError() != 183       # 183 = ERROR_ALREADY_EXISTS
+    except Exception:
+        return True
+
+_SHOW_SETTINGS_EVENT = "AppSwitcher_ShowSettings_Event"
+
+def _event_handle():
+    import ctypes
+    k = ctypes.windll.kernel32
+    k.CreateEventW.restype  = ctypes.c_void_p
+    k.CreateEventW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_wchar_p]
+    # auto-reset, initially unset; same name returns a handle to the existing one
+    return k, k.CreateEventW(None, False, False, _SHOW_SETTINGS_EVENT)
+
+def signal_show_settings():
+    """2nd instance -> wake the already-running instance to open Settings."""
+    try:
+        k, h = _event_handle()
+        if h:
+            k.SetEvent.argtypes = [ctypes.c_void_p]
+            k.SetEvent(h)
+    except Exception:
+        pass
+
+def _watch_show_settings():
+    """1st instance: block on the event; each signal opens the Settings window
+    on the Qt thread. Lets a later double-click focus this instance instead of
+    silently doing nothing."""
+    try:
+        import time
+        k, h = _event_handle()
+        if not h:
+            return
+        k.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        while True:
+            if k.WaitForSingleObject(h, 0xFFFFFFFF) != 0:   # 0 = WAIT_OBJECT_0
+                continue
+            try:
+                import switcher, gui
+                for _ in range(50):                          # wait for Qt bridge
+                    if getattr(switcher, "_bridge", None) is not None:
+                        switcher.post(gui.show_settings)
+                        break
+                    time.sleep(0.05)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 def main():
     if "--install" in sys.argv:
         install_startup()
@@ -59,6 +126,12 @@ def main():
         return
 
     check_deps()
+
+    if not acquire_single_instance():
+        # Already running: ask that instance to surface its Settings, then exit.
+        signal_show_settings()
+        print("[exit] AppSwitcher is already running — opened its Settings.")
+        return
 
     # Import after deps check
     import switcher
@@ -93,6 +166,8 @@ def main():
             on_alttab     = switcher.handle_alttab,
         )
     threading.Thread(target=listen, daemon=True).start()
+    # Listen for a later launch asking us to show Settings (focus-existing).
+    threading.Thread(target=_watch_show_settings, daemon=True).start()
 
     # Open the settings window on a MANUAL launch (double-click / after install),
     # but NOT when Windows starts it automatically (--startup).
