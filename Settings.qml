@@ -6,7 +6,7 @@ import QtQuick.Effects
 
 Window {
     id: win
-    width: 900; height: 712
+    width: 1200; height: 600
     flags: Qt.FramelessWindowHint | Qt.Window
     color: "transparent"
     visible: false
@@ -171,13 +171,13 @@ Window {
                 }
             }
 
-            // two columns
+            // three columns
             RowLayout {
                 Layout.fillWidth: true; Layout.fillHeight: true; spacing: 18
 
                 // LEFT — Look
                 Card {
-                    Layout.fillWidth: true; Layout.fillHeight: true
+                    Layout.preferredWidth: 1; Layout.fillWidth: true; Layout.fillHeight: true
                     ColumnLayout {
                         anchors.fill: parent; anchors.margins: 20; spacing: 14
                         Section { text: "LOOK" }
@@ -196,9 +196,9 @@ Window {
                     }
                 }
 
-                // RIGHT — Feel
+                // MIDDLE — Feel
                 Card {
-                    Layout.fillWidth: true; Layout.fillHeight: true
+                    Layout.preferredWidth: 1; Layout.fillWidth: true; Layout.fillHeight: true
                     ColumnLayout {
                         anchors.fill: parent; anchors.margins: 20; spacing: 16
                         Section { text: "FEEL" }
@@ -228,42 +228,52 @@ Window {
                         }
                     }
                 }
-            }
 
-            // blocklist — individual windows hidden from the switcher
-            Card {
-                Layout.fillWidth: true; implicitHeight: 176
-                ColumnLayout {
-                    anchors.fill: parent; anchors.margins: 18; spacing: 8
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Section { text: "HIDE FROM SWITCHER"; Layout.fillWidth: true }
-                        Label2 { text: backend.openWindows.length + " windows · live" }
-                    }
-                    ListView {
-                        id: blklist
-                        Layout.fillWidth: true; Layout.fillHeight: true
-                        clip: true; spacing: 3; model: backend.openWindows
-                        boundsBehavior: Flickable.StopAtBounds
-                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-                        delegate: Rectangle {
-                            width: blklist.width; height: 44; radius: 11
-                            color: rowMa.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent"
-                            RowLayout {
-                                anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 8
-                                spacing: 12
-                                Rectangle { width: 8; height: 8; radius: 4
-                                    color: modelData.blocked ? win.accent : Qt.rgba(1, 1, 1, 0.20) }
-                                Text { text: modelData.title
-                                    color: modelData.blocked ? win.text2 : win.text1
-                                    font.family: win.uiFont; font.pixelSize: 14
-                                    font.strikeout: modelData.blocked
-                                    elide: Text.ElideRight; Layout.fillWidth: true }
-                                IOSSwitch { checked: modelData.blocked
-                                    onToggled: backend.setBlocked(modelData.title, v) }
+                // RIGHT — Hide
+                Card {
+                    Layout.preferredWidth: 1; Layout.fillWidth: true; Layout.fillHeight: true
+                    ColumnLayout {
+                        anchors.fill: parent; anchors.margins: 18; spacing: 8
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 8
+                            Section { text: "HIDE FROM SWITCHER"; Layout.fillWidth: true }
+                            Label2 { text: backend.openWindows.length + " · live" }
+                            Rectangle {                       // manual refresh
+                                width: 26; height: 26; radius: 13
+                                color: rfMa.containsMouse ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(1, 1, 1, 0.05)
+                                scale: rfMa.pressed ? 0.9 : 1.0
+                                Behavior on scale { NumberAnimation { duration: 90 } }
+                                Text { anchors.centerIn: parent; text: "⟳"
+                                    color: win.text1; font.pixelSize: 15 }
+                                MouseArea { id: rfMa; anchors.fill: parent; hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor; onClicked: backend.refresh() }
                             }
-                            MouseArea { id: rowMa; anchors.fill: parent; hoverEnabled: true
-                                acceptedButtons: Qt.NoButton }
+                        }
+                        ListView {
+                            id: blklist
+                            Layout.fillWidth: true; Layout.fillHeight: true
+                            clip: true; spacing: 3; model: backend.openWindows
+                            boundsBehavior: Flickable.StopAtBounds
+                            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                            delegate: Rectangle {
+                                width: blklist.width; height: 44; radius: 11
+                                color: rowMa.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent"
+                                RowLayout {
+                                    anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 8
+                                    spacing: 12
+                                    Rectangle { width: 8; height: 8; radius: 4
+                                        color: modelData.blocked ? win.accent : Qt.rgba(1, 1, 1, 0.20) }
+                                    Text { text: modelData.title
+                                        color: modelData.blocked ? win.text2 : win.text1
+                                        font.family: win.uiFont; font.pixelSize: 14
+                                        font.strikeout: modelData.blocked
+                                        elide: Text.ElideRight; Layout.fillWidth: true }
+                                    IOSSwitch { checked: modelData.blocked
+                                        onToggled: backend.setBlocked(modelData.title, v) }
+                                }
+                                MouseArea { id: rowMa; anchors.fill: parent; hoverEnabled: true
+                                    acceptedButtons: Qt.NoButton }
+                            }
                         }
                     }
                 }

@@ -52,6 +52,11 @@ class Backend(QtCore.QObject):
     def stopWatch(self):
         self._poll.stop()
 
+    @QtCore.Slot()
+    def refresh(self):
+        self._last_sig = None
+        self.blocklistChanged.emit()
+
     # blocklist -------------------------------------------------------------
     @QtCore.Property('QVariantList', notify=blocklistChanged)
     def openWindows(self):
