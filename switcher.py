@@ -55,7 +55,7 @@ SETTINGS  = {
     "accent":     [150, 205, 255],
     "warn_dismissed": False,  # user dismissed the 3-finger warning
     "alt_tab":    True,       # replace Windows Alt+Tab with this switcher
-    "blocklist":  [],         # exe basenames (lowercase) to hide from the switcher
+    "blocklist":  [],         # window titles to hide from the switcher
 }
 
 def load_settings():
@@ -126,35 +126,6 @@ def _is_alt_tab_window(hwnd):
         return False
     return True
 
-_exe_cache = {}                  # hwnd -> exe basename (lowercase)
-
-def window_exe(hwnd):
-    """Lowercase exe basename owning hwnd (e.g. 'chrome.exe'), or '' if unknown.
-    Cached per hwnd — a window's owning process never changes."""
-    hit = _exe_cache.get(hwnd)
-    if hit is not None:
-        return hit
-    name = ""
-    try:
-        pid = ctypes.c_ulong(0)
-        _u32.GetWindowThreadProcessId(ctypes.c_void_p(int(hwnd)), ctypes.byref(pid))
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
-                                               False, pid.value)
-        if h:
-            try:
-                buf = ctypes.create_unicode_buffer(560)
-                size = ctypes.c_ulong(560)
-                if ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, buf,
-                                                                     ctypes.byref(size)):
-                    name = os.path.basename(buf.value).lower()
-            finally:
-                ctypes.windll.kernel32.CloseHandle(h)
-    except Exception:
-        name = ""
-    _exe_cache[hwnd] = name
-    return name
-
 def get_open_windows():
     windows = []
     def cb(hwnd, _):
@@ -164,21 +135,21 @@ def get_open_windows():
     win32gui.EnumWindows(cb, None)
     blocked = set(SETTINGS.get("blocklist", []))
     if blocked:
-        windows = [(h, t) for (h, t) in windows if window_exe(h) not in blocked]
+        windows = [(h, t) for (h, t) in windows if t not in blocked]
     return windows
 
-def list_open_exes():
-    """{exe_basename: sample_window_title} for every currently-open alt-tab
-    window, IGNORING the blocklist — feeds the Settings blocklist editor."""
-    seen = {}
+def list_open_titles():
+    """Titles of every currently-open alt-tab window, IGNORING the blocklist —
+    feeds the Settings 'hide window' editor (one entry per window title)."""
+    titles, seen = [], set()
     def cb(hwnd, _):
         if _is_alt_tab_window(hwnd):
-            exe = window_exe(hwnd)
-            if exe and exe not in seen:
-                seen[exe] = win32gui.GetWindowText(hwnd) or exe
+            t = win32gui.GetWindowText(hwnd)
+            if t and t not in seen:
+                seen.add(t); titles.append(t)
         return True
     win32gui.EnumWindows(cb, None)
-    return seen
+    return titles
 
 class _MOUSEINPUT(ctypes.Structure):
     _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),

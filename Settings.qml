@@ -244,9 +244,10 @@ Window {
                         Flow {
                             id: flow; width: parent.width; spacing: 8
                             Repeater {
-                                model: backend.openApps
+                                model: backend.openWindows
                                 Rectangle {
-                                    radius: 13; height: 32; width: chip.implicitWidth + 26
+                                    radius: 13; height: 32
+                                    width: icon.implicitWidth + ttl.width + 22
                                     color: modelData.blocked
                                         ? Qt.rgba(win.accent.r, win.accent.g, win.accent.b, 0.22)
                                         : Qt.rgba(1, 1, 1, 0.05)
@@ -255,18 +256,20 @@ Window {
                                     scale: cma.pressed ? 0.95 : 1.0
                                     Behavior on scale { NumberAnimation { duration: 90 } }
                                     Row {
-                                        id: chip; anchors.centerIn: parent; spacing: 6
-                                        Text { text: modelData.blocked ? "🚫" : "＋"
+                                        anchors.centerIn: parent; spacing: 6
+                                        Text { id: icon; text: modelData.blocked ? "🚫" : "＋"
                                             color: modelData.blocked ? win.accent : win.text2
                                             font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
-                                        Text { text: modelData.name; color: win.text1
+                                        Text { id: ttl; text: modelData.title; color: win.text1
                                             font.family: win.uiFont; font.pixelSize: 13
+                                            elide: Text.ElideRight
+                                            width: Math.min(implicitWidth, 300)
                                             anchors.verticalCenter: parent.verticalCenter }
                                     }
                                     MouseArea {
                                         id: cma; anchors.fill: parent; hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor
-                                        onClicked: backend.setBlocked(modelData.exe, !modelData.blocked)
+                                        onClicked: backend.setBlocked(modelData.title, !modelData.blocked)
                                     }
                                 }
                             }

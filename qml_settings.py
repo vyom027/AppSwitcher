@@ -34,27 +34,23 @@ class Backend(QtCore.QObject):
 
     # blocklist -------------------------------------------------------------
     @QtCore.Property('QVariantList', notify=blocklistChanged)
-    def openApps(self):
-        """[{exe, name, blocked}] — currently-open apps + already-blocked ones."""
-        exes = dict(S.list_open_exes())                 # exe -> sample title
-        blocked = [e.lower() for e in S.SETTINGS.get("blocklist", [])]
-        for e in blocked:
-            exes.setdefault(e, e)
-        out = []
-        for exe in sorted(exes):
-            base = exe[:-4] if exe.endswith(".exe") else exe
-            name = (base[:1].upper() + base[1:]) if base else exe
-            out.append({"exe": exe, "name": name, "blocked": exe in blocked})
-        return out
+    def openWindows(self):
+        """[{title, blocked}] — every open window + any already-blocked title."""
+        titles = S.list_open_titles()
+        blocked = list(S.SETTINGS.get("blocklist", []))
+        seen = set(titles)
+        for t in blocked:                               # keep blocked-but-closed
+            if t not in seen:
+                titles.append(t); seen.add(t)
+        return [{"title": t, "blocked": t in blocked} for t in titles]
 
     @QtCore.Slot(str, bool)
-    def setBlocked(self, exe, blocked):
-        exe = (exe or "").lower()
-        bl = [e.lower() for e in S.SETTINGS.get("blocklist", [])]
-        if blocked and exe not in bl:
-            bl.append(exe)
+    def setBlocked(self, title, blocked):
+        bl = list(S.SETTINGS.get("blocklist", []))
+        if blocked and title not in bl:
+            bl.append(title)
         elif not blocked:
-            bl = [e for e in bl if e != exe]
+            bl = [t for t in bl if t != title]
         S.SETTINGS["blocklist"] = bl
         S.save_settings()
         self.blocklistChanged.emit()
