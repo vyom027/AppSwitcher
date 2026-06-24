@@ -26,10 +26,38 @@ def _three_finger_enabled():
 class Backend(QtCore.QObject):
     changed = QtCore.Signal()
     warnChanged = QtCore.Signal()
+    blocklistChanged = QtCore.Signal()
 
     def __init__(self):
         super().__init__()
         self._warn = _three_finger_enabled()
+
+    # blocklist -------------------------------------------------------------
+    @QtCore.Property('QVariantList', notify=blocklistChanged)
+    def openApps(self):
+        """[{exe, name, blocked}] — currently-open apps + already-blocked ones."""
+        exes = dict(S.list_open_exes())                 # exe -> sample title
+        blocked = [e.lower() for e in S.SETTINGS.get("blocklist", [])]
+        for e in blocked:
+            exes.setdefault(e, e)
+        out = []
+        for exe in sorted(exes):
+            base = exe[:-4] if exe.endswith(".exe") else exe
+            name = (base[:1].upper() + base[1:]) if base else exe
+            out.append({"exe": exe, "name": name, "blocked": exe in blocked})
+        return out
+
+    @QtCore.Slot(str, bool)
+    def setBlocked(self, exe, blocked):
+        exe = (exe or "").lower()
+        bl = [e.lower() for e in S.SETTINGS.get("blocklist", [])]
+        if blocked and exe not in bl:
+            bl.append(exe)
+        elif not blocked:
+            bl = [e for e in bl if e != exe]
+        S.SETTINGS["blocklist"] = bl
+        S.save_settings()
+        self.blocklistChanged.emit()
 
     # static lists ----------------------------------------------------------
     @QtCore.Property('QStringList', constant=True)
@@ -155,6 +183,7 @@ def open_settings():
         _engine.load(QtCore.QUrl.fromLocalFile(qml))
     if _engine.rootObjects():
         _backend.recheckWarning()
+        _backend.blocklistChanged.emit()      # refresh open-apps list each show
         win = _engine.rootObjects()[0]
         win.setProperty("visible", True)
         try:

@@ -6,7 +6,7 @@ import QtQuick.Effects
 
 Window {
     id: win
-    width: 900; height: 560
+    width: 900; height: 670
     flags: Qt.FramelessWindowHint | Qt.Window
     color: "transparent"
     visible: false
@@ -222,6 +222,53 @@ Window {
                                     scale: sm.pressed ? 0.88 : 1.0; Behavior on scale { NumberAnimation { duration: 90 } }
                                     MouseArea { id: sm; anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                         onClicked: backend.accent = modelData } }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // blocklist — apps hidden from the switcher
+            Card {
+                Layout.fillWidth: true; implicitHeight: 124
+                ColumnLayout {
+                    anchors.fill: parent; anchors.margins: 18; spacing: 10
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Section { text: "HIDE FROM SWITCHER"; Layout.fillWidth: true }
+                        Label2 { text: "tap an app to toggle" }
+                    }
+                    Flickable {
+                        Layout.fillWidth: true; Layout.fillHeight: true
+                        contentHeight: flow.height; clip: true; boundsBehavior: Flickable.StopAtBounds
+                        Flow {
+                            id: flow; width: parent.width; spacing: 8
+                            Repeater {
+                                model: backend.openApps
+                                Rectangle {
+                                    radius: 13; height: 32; width: chip.implicitWidth + 26
+                                    color: modelData.blocked
+                                        ? Qt.rgba(win.accent.r, win.accent.g, win.accent.b, 0.22)
+                                        : Qt.rgba(1, 1, 1, 0.05)
+                                    border.width: 1
+                                    border.color: modelData.blocked ? win.accent : Qt.rgba(1, 1, 1, 0.08)
+                                    scale: cma.pressed ? 0.95 : 1.0
+                                    Behavior on scale { NumberAnimation { duration: 90 } }
+                                    Row {
+                                        id: chip; anchors.centerIn: parent; spacing: 6
+                                        Text { text: modelData.blocked ? "🚫" : "＋"
+                                            color: modelData.blocked ? win.accent : win.text2
+                                            font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
+                                        Text { text: modelData.name; color: win.text1
+                                            font.family: win.uiFont; font.pixelSize: 13
+                                            anchors.verticalCenter: parent.verticalCenter }
+                                    }
+                                    MouseArea {
+                                        id: cma; anchors.fill: parent; hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: backend.setBlocked(modelData.exe, !modelData.blocked)
+                                    }
+                                }
                             }
                         }
                     }
