@@ -31,6 +31,26 @@ class Backend(QtCore.QObject):
     def __init__(self):
         super().__init__()
         self._warn = _three_finger_enabled()
+        self._last_sig = None
+        self._poll = QtCore.QTimer(self)
+        self._poll.setInterval(1000)            # live-refresh the window list
+        self._poll.timeout.connect(self._refresh_if_changed)
+
+    def _refresh_if_changed(self):
+        sig = tuple((w["title"], w["blocked"]) for w in self.openWindows)
+        if sig != self._last_sig:
+            self._last_sig = sig
+            self.blocklistChanged.emit()
+
+    @QtCore.Slot()
+    def startWatch(self):
+        self._last_sig = None
+        self._refresh_if_changed()
+        self._poll.start()
+
+    @QtCore.Slot()
+    def stopWatch(self):
+        self._poll.stop()
 
     # blocklist -------------------------------------------------------------
     @QtCore.Property('QVariantList', notify=blocklistChanged)

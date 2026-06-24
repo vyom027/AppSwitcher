@@ -6,11 +6,13 @@ import QtQuick.Effects
 
 Window {
     id: win
-    width: 900; height: 670
+    width: 900; height: 712
     flags: Qt.FramelessWindowHint | Qt.Window
     color: "transparent"
     visible: false
     title: "AppSwitcher"
+
+    onVisibleChanged: visible ? backend.startWatch() : backend.stopWatch()
 
     property color accent: backend.accent
     property color text1: "#EEF1F6"
@@ -228,51 +230,40 @@ Window {
                 }
             }
 
-            // blocklist — apps hidden from the switcher
+            // blocklist — individual windows hidden from the switcher
             Card {
-                Layout.fillWidth: true; implicitHeight: 124
+                Layout.fillWidth: true; implicitHeight: 176
                 ColumnLayout {
-                    anchors.fill: parent; anchors.margins: 18; spacing: 10
+                    anchors.fill: parent; anchors.margins: 18; spacing: 8
                     RowLayout {
                         Layout.fillWidth: true
                         Section { text: "HIDE FROM SWITCHER"; Layout.fillWidth: true }
-                        Label2 { text: "tap an app to toggle" }
+                        Label2 { text: backend.openWindows.length + " windows · live" }
                     }
-                    Flickable {
+                    ListView {
+                        id: blklist
                         Layout.fillWidth: true; Layout.fillHeight: true
-                        contentHeight: flow.height; clip: true; boundsBehavior: Flickable.StopAtBounds
-                        Flow {
-                            id: flow; width: parent.width; spacing: 8
-                            Repeater {
-                                model: backend.openWindows
-                                Rectangle {
-                                    radius: 13; height: 32
-                                    width: icon.implicitWidth + ttl.width + 22
-                                    color: modelData.blocked
-                                        ? Qt.rgba(win.accent.r, win.accent.g, win.accent.b, 0.22)
-                                        : Qt.rgba(1, 1, 1, 0.05)
-                                    border.width: 1
-                                    border.color: modelData.blocked ? win.accent : Qt.rgba(1, 1, 1, 0.08)
-                                    scale: cma.pressed ? 0.95 : 1.0
-                                    Behavior on scale { NumberAnimation { duration: 90 } }
-                                    Row {
-                                        anchors.centerIn: parent; spacing: 6
-                                        Text { id: icon; text: modelData.blocked ? "🚫" : "＋"
-                                            color: modelData.blocked ? win.accent : win.text2
-                                            font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
-                                        Text { id: ttl; text: modelData.title; color: win.text1
-                                            font.family: win.uiFont; font.pixelSize: 13
-                                            elide: Text.ElideRight
-                                            width: Math.min(implicitWidth, 300)
-                                            anchors.verticalCenter: parent.verticalCenter }
-                                    }
-                                    MouseArea {
-                                        id: cma; anchors.fill: parent; hoverEnabled: true
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: backend.setBlocked(modelData.title, !modelData.blocked)
-                                    }
-                                }
+                        clip: true; spacing: 3; model: backend.openWindows
+                        boundsBehavior: Flickable.StopAtBounds
+                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                        delegate: Rectangle {
+                            width: blklist.width; height: 44; radius: 11
+                            color: rowMa.containsMouse ? Qt.rgba(1, 1, 1, 0.05) : "transparent"
+                            RowLayout {
+                                anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 8
+                                spacing: 12
+                                Rectangle { width: 8; height: 8; radius: 4
+                                    color: modelData.blocked ? win.accent : Qt.rgba(1, 1, 1, 0.20) }
+                                Text { text: modelData.title
+                                    color: modelData.blocked ? win.text2 : win.text1
+                                    font.family: win.uiFont; font.pixelSize: 14
+                                    font.strikeout: modelData.blocked
+                                    elide: Text.ElideRight; Layout.fillWidth: true }
+                                IOSSwitch { checked: modelData.blocked
+                                    onToggled: backend.setBlocked(modelData.title, v) }
                             }
+                            MouseArea { id: rowMa; anchors.fill: parent; hoverEnabled: true
+                                acceptedButtons: Qt.NoButton }
                         }
                     }
                 }
