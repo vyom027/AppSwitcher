@@ -288,6 +288,151 @@ def get_backdrop(sw, sh):
     prewarm_backdrop()
     return _bg_cache["img"]
 
+# ─── Slide frame cache ────────────────────────────────────────────────────────
+# The swipe freeze was NOT the window capture — it was building two full-screen
+# QPixmaps from PIL on the UI thread every switch (~50ms typical, spiking to
+# ~1s under GC pressure). So we split the work:
+#   • BACKGROUND (prewarm, fired when 3 fingers land): capture + resize +
+#     convert to raw RGBA bytes, keyed by hwnd. All the heavy CPU/IO lives here.
+#   • UI THREAD (slide): turn ready bytes into a QPixmap once, cache the QPixmap,
+#     and reuse it across switches until the capture goes stale.
+# Result: a warm swipe builds in a few ms instead of 50–950ms.
+_frame_cache  = {}              # hwnd -> {"bytes","w","h","ts","pix"}
+_frame_lock   = threading.Lock()
+_slide_active = [False]         # True while a slide animates: defer heavy
+                                # pixmap pre-builds so they don't stall frames
+CAP_TTL       = 2.0             # seconds a cached frame stays fresh
+RENDER_MAX   = 1920            # cap the long edge of slide frames; the view
+                               # stretches them back to full screen. On a 4K
+                               # panel this is 4x fewer pixels to build/composite
+                               # — and the downscale is invisible mid-motion.
+
+def _render_size(sw, sh):
+    s = min(1.0, RENDER_MAX / float(max(sw, sh)))
+    return max(1, int(sw * s)), max(1, int(sh * s))
+
+def _grab_screen_rect(hwnd):
+    """Instant capture of a *visible* window straight off the composited screen
+    (no PrintWindow repaint). Only valid for the foreground / unoccluded window."""
+    try:
+        l, t, r, b = win32gui.GetWindowRect(hwnd)
+        if r - l <= 0 or b - t <= 0:
+            return None
+        return ImageGrab.grab(bbox=(l, t, r, b), all_screens=True)
+    except Exception:
+        return None
+
+def _frame_bytes(hwnd, w, h, fast=False):
+    """Capture hwnd and return raw RGBA bytes already sized to (w, h), or None.
+    fast=True screen-grabs the foreground window instead of PrintWindow."""
+    img = None
+    if fast:
+        try:
+            if hwnd == _u32.GetForegroundWindow() and not win32gui.IsIconic(hwnd):
+                img = _grab_screen_rect(hwnd)
+        except Exception:
+            img = None
+    if img is None:
+        img = capture_window_image(hwnd)
+    if img is None:
+        return None
+    img = img.resize((w, h), Image.BILINEAR).convert("RGBA")
+    return img.tobytes("raw", "RGBA")
+
+def _cached_pixmap(hwnd, w, h):
+    """Return a fresh cached QPixmap for hwnd at (w, h), or None — never builds
+    or captures. Lets the slide prefer a warm pixmap over re-converting a PIL."""
+    now = time.time()
+    with _frame_lock:
+        e = _frame_cache.get(hwnd)
+        if (e and now - e["ts"] < CAP_TTL and e["w"] == w and e["h"] == h
+                and e.get("pix") is not None):
+            return e["pix"]
+    return None
+
+def _cache_pixmap_from_pil(hwnd, pil, w, h):
+    """UI-thread: build a slide pixmap from an already-captured PIL frame and
+    cache it (used to warm the cache from the picker's own captures)."""
+    try:
+        data = pil.resize((w, h), Image.BILINEAR).convert("RGBA").tobytes("raw", "RGBA")
+        qim = QtGui.QImage(data, w, h, QtGui.QImage.Format.Format_RGBA8888)
+        with _frame_lock:
+            _frame_cache[hwnd] = {"bytes": None, "w": w, "h": h,
+                                  "ts": time.time(), "pix": QtGui.QPixmap.fromImage(qim)}
+    except Exception:
+        pass
+
+def _get_pixmap(hwnd, w, h):
+    """UI-thread only: QPixmap for hwnd at (w, h). Reuses the prewarmed bytes /
+    cached pixmap; only falls back to an inline capture on a cold miss."""
+    now = time.time()
+    with _frame_lock:
+        e = _frame_cache.get(hwnd)
+        fresh = bool(e and now - e["ts"] < CAP_TTL and e["w"] == w and e["h"] == h)
+        if fresh and e.get("pix") is not None:
+            return e["pix"]                  # hot: zero rebuild
+        data = e["bytes"] if fresh else None
+        ts   = e["ts"] if fresh else now
+    if data is None:                         # cold: capture inline (slow path)
+        data = _frame_bytes(hwnd, w, h, fast=True)
+        if data is None:
+            return None
+        ts = now
+    qim = QtGui.QImage(data, w, h, QtGui.QImage.Format.Format_RGBA8888)
+    pix = QtGui.QPixmap.fromImage(qim)       # fromImage copies; no extra .copy()
+    with _frame_lock:                        # cache pixmap, drop the big bytes buf
+        _frame_cache[hwnd] = {"bytes": None, "w": w, "h": h, "ts": ts, "pix": pix}
+    return pix
+
+def _prewarm_one(hwnd, w, h):
+    data = _frame_bytes(hwnd, w, h)          # background: PrintWindow (occluded ok)
+    if data is None:
+        return
+    with _frame_lock:
+        _frame_cache[hwnd] = {"bytes": data, "w": w, "h": h,
+                              "ts": time.time(), "pix": None}
+    # Build the QPixmap NOW on the UI thread (idle during finger-down), so the
+    # actual switch hits the cached-pixmap path (~ms) instead of paying the
+    # full-screen fromImage + GC (which spiked to ~1s) on the hot path. But never
+    # while a slide is animating — that heavy build would stall its frames; defer
+    # until the animation is done (the pixmap is only needed next swipe anyway).
+    def _warm():
+        if _slide_active[0]:
+            QtCore.QTimer.singleShot(60, _warm)
+            return
+        _get_pixmap(hwnd, w, h)
+    post(_warm)
+
+def prewarm_windows():
+    """Pre-capture the foreground window + its two swipe-reachable neighbors so a
+    swipe's slide starts without any synchronous capture/convert. Runs in PARALLEL
+    (fire-and-forget). Background-thread safe; cheap on repeat (TTL-gated)."""
+    try:
+        wx, wy, sw, sh = work_area()
+        w, h = _render_size(sw, sh)
+        wins = get_open_windows()
+        if not wins:
+            return
+        try:
+            fg  = win32gui.GetForegroundWindow()
+            idx = next(i for i, (hh, _) in enumerate(wins) if hh == fg)
+            wins = [wins[idx]] + wins[:idx] + wins[idx+1:]
+        except Exception:
+            pass
+        targets = {wins[0][0]}                # foreground + next / prev
+        if len(wins) > 1:
+            targets.add(wins[1][0]); targets.add(wins[-1][0])
+        now = time.time()
+        with _frame_lock:                     # prune stale entries
+            for hh in [hh for hh, v in _frame_cache.items() if now - v["ts"] > 10.0]:
+                del _frame_cache[hh]
+            skip = {hh for hh in targets
+                    if (v := _frame_cache.get(hh)) and now - v["ts"] < CAP_TTL}
+        for hh in targets - skip:
+            threading.Thread(target=_prewarm_one, args=(hh, w, h), daemon=True).start()
+    except Exception:
+        pass
+
 def _reflection(card, frac=0.5, top_alpha=120):
     rh = max(1, int(card.height * frac))
     refl = card.transpose(Image.FLIP_TOP_BOTTOM).crop((0, 0, card.width, rh))
@@ -311,7 +456,9 @@ def _pil2pix(im):
     im = im.convert("RGBA")
     data = im.tobytes("raw", "RGBA")
     qim = QtGui.QImage(data, im.width, im.height, QtGui.QImage.Format.Format_RGBA8888)
-    return QtGui.QPixmap.fromImage(qim.copy())   # copy: own the buffer
+    # fromImage already copies the pixels into the pixmap, and `data` is alive
+    # for this whole call — so the old qim.copy() was a wasted full-image copy.
+    return QtGui.QPixmap.fromImage(qim)
 
 class _Bridge(QtCore.QObject):
     """Marshal callables from the gesture thread onto the Qt UI thread."""
@@ -470,30 +617,54 @@ class SlideAnimator:
         # cur_img/nxt_img: reuse already-captured images (e.g. from the picker)
         # to skip the ~150ms re-capture so the animation starts instantly.
         wx, wy, sw, sh = work_area()
-        cur = cur_img or capture_window_image(current_hwnd) or Image.new("RGB", (sw, sh), (24, 24, 28))
-        nxt = nxt_img or capture_window_image(next_hwnd) or Image.new("RGB", (sw, sh), (24, 24, 28))
-        cur = cur.resize((sw, sh), Image.BILINEAR)
-        nxt = nxt.resize((sw, sh), Image.BILINEAR)
+        rw, rh = _render_size(sw, sh)             # reduced render resolution
+        _fallback = lambda: _pil2pix(Image.new("RGB", (rw, rh), (24, 24, 28)))
 
+        def _pix(hwnd, passed_img):
+            # Prefer a warm cached pixmap (3-finger prewarm OR picker pre-cache).
+            p = _cached_pixmap(hwnd, rw, rh)
+            if p is not None:
+                return p
+            # else reuse the picker's PIL frame (no re-capture), or capture cold.
+            if passed_img is not None:
+                return _pil2pix(passed_img.resize((rw, rh), Image.BILINEAR))
+            return _get_pixmap(hwnd, rw, rh) or _fallback()
+
+        _t1 = time.time()
+        cpix = _pix(current_hwnd, cur_img)
+        npix = _pix(next_hwnd, nxt_img)
         ov = QtOverlay(sw, sh, clickable=False, x=wx, y=wy, activate=True)
         _overlays.add(ov)
-        pc = ov.scene.addPixmap(_pil2pix(cur))
-        pn = ov.scene.addPixmap(_pil2pix(nxt))
-        pc.setTransformOriginPoint(sw / 2, sh / 2)
-        pn.setTransformOriginPoint(sw / 2, sh / 2)
+        if (rw, rh) != (sw, sh):                  # render small, stretch to fill
+            ov.scene.setSceneRect(0, 0, rw, rh)
+            ov.setSceneRect(0, 0, rw, rh)
+            ov.resetTransform(); ov.scale(sw / rw, sh / rh)
+        pc = ov.scene.addPixmap(cpix)
+        pn = ov.scene.addPixmap(npix)
+        pc.setTransformOriginPoint(rw / 2, rh / 2)
+        pn.setTransformOriginPoint(rw / 2, rh / 2)
         frame = ANIMATIONS.get(SETTINGS["animation"], _a_slide)
-        frame(0.0, pc, pn, sw, sh, direction)     # initial state
+        frame(0.0, pc, pn, rw, rh, direction)     # initial state
+        _slide_active[0] = True                   # defer pre-builds until done
+        _t2 = time.time()
         ov.reveal(1.0)
+        if DEBUG:
+            print(f"[slide] build={int((_t2-_t1)*1000)}ms "
+                  f"reveal={int((time.time()-_t2)*1000)}ms", flush=True)
+        _frame0 = {"t": time.time()}
 
         done = {"f": False}
         def finish():
             if done["f"]:
                 return
             done["f"] = True
+            _slide_active[0] = False
             if commit:
                 bring_to_front(next_hwnd)    # switch behind the last frame
                 QtCore.QTimer.singleShot(160, nudge_cursor)
                 QtCore.QTimer.singleShot(380, nudge_cursor)
+                # foreground changed -> rewarm so a follow-up swipe is instant
+                threading.Thread(target=prewarm_windows, daemon=True).start()
             ov.destroy_overlay()
             if on_done:
                 on_done()
@@ -504,7 +675,12 @@ class SlideAnimator:
         anim.setEndValue(1.0)
         anim.setDuration(max(80, dur))
         anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-        anim.valueChanged.connect(lambda t: frame(t, pc, pn, sw, sh, direction))
+        def _on_val(t):
+            if DEBUG and _frame0["t"] is not None:
+                print(f"[slide] first frame +{int((time.time()-_frame0['t'])*1000)}ms", flush=True)
+                _frame0["t"] = None
+            frame(t, pc, pn, rw, rh, direction)
+        anim.valueChanged.connect(_on_val)
         anim.finished.connect(finish)
         ov._anim = anim
         anim.start()
@@ -521,12 +697,22 @@ class SlideAnimator:
         accent = accent_qcolor()
         step = float(SETTINGS.get("sensitivity", PICKER_STEP)) or PICKER_STEP
 
-        imgs = []
-        for hwnd, _ in windows:
+        # Capture every window's thumbnail IN PARALLEL. Done sequentially this was
+        # n × ~150ms of PrintWindow blocking the UI thread before the picker could
+        # even appear — the 1–2s freeze on Alt+Tab with several windows open.
+        import concurrent.futures
+        _tcap = time.time()
+        def _cap(hwnd):
             im = capture_window_image(hwnd)
             if not (im and im.width > 0 and im.height > 0):
                 im = Image.new("RGB", (160, 100), (40, 42, 50))
-            imgs.append(im)
+            return im
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max(1, min(8, len(windows)))) as ex:
+            imgs = list(ex.map(_cap, [h for h, _ in windows]))
+        if DEBUG:
+            print(f"[picker] captured {len(imgs)} windows in "
+                  f"{int((time.time()-_tcap)*1000)}ms", flush=True)
 
         ov = QtOverlay(sw, sh, clickable=True)
         _overlays.add(ov)
@@ -550,6 +736,19 @@ class SlideAnimator:
 
         state = {"focus": float(current_idx), "selected": current_idx, "done": False}
         layout.update(state["focus"], state["selected"])
+
+        # Warm the slide cache from the frames we already captured, so the slide
+        # after selection is instant — matters most for keyboard Alt+Tab, which
+        # gets no gesture prewarm. Built lazily (one per event-loop turn) so it
+        # never delays the picker fade-in; reuses imgs, no re-capture.
+        _, _, _fsw, _fsh = work_area()
+        _rw, _rh = _render_size(_fsw, _fsh)
+        def _precache(i=0):
+            if ov._closed or i >= len(windows):
+                return
+            _cache_pixmap_from_pil(windows[i][0], imgs[i], _rw, _rh)
+            QtCore.QTimer.singleShot(0, lambda: _precache(i + 1))
+        QtCore.QTimer.singleShot(0, _precache)
 
         timer = QtCore.QTimer(ov)
         def finish(idx):
@@ -769,18 +968,33 @@ _switcher = AppSwitcher()
 
 # Gesture callbacks fire on the background listener thread; marshal onto the UI
 # thread, where all Qt lives.
+def _post_timed(tag, fn):
+    """post(fn) but log how long it waited in the UI-thread queue before running
+    — reveals lag from a clogged event loop that build= timing can't see."""
+    t = time.time()
+    def run():
+        if DEBUG:
+            print(f"[queue] {tag} waited {int((time.time()-t)*1000)}ms", flush=True)
+        fn()
+    post(run)
+
 def handle_swipe(direction):
-    post(lambda: _switcher.switch(direction))
+    _post_timed("swipe", lambda: _switcher.switch(direction))
 
 def handle_hold_swipe(direction):
-    post(lambda: _switcher.show_picker())
+    _post_timed("hold", lambda: _switcher.show_picker())
 
 def handle_arm():
-    post(prewarm_backdrop)
+    # Off the UI thread: PrintWindow/ImageGrab don't need Qt, and we must not
+    # freeze the event loop while pre-capturing.
+    def _warm():
+        prewarm_backdrop()
+        prewarm_windows()
+    threading.Thread(target=_warm, daemon=True).start()
 
 def handle_alttab(direction):
     # fired from the keyboard hook (background thread) on Alt+Tab
-    post(lambda: _switcher.alttab(direction))
+    _post_timed("alttab", lambda: _switcher.alttab(direction))
 
 if __name__ == "__main__":
     print("AppSwitcher loaded. Run main.py to start.")

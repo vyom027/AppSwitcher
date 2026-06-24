@@ -320,6 +320,11 @@ class GestureTracker:
             self._last_x, self._last_y = avg_x, avg_y
             self._still_since = now
             self._picker      = False
+            # Prewarm immediately: capturing the windows now (in the background)
+            # overlaps the finger travel, so a swipe's slide starts instantly.
+            self._prewarmed   = True
+            if self.on_arm:
+                self.on_arm()
             return
 
         if self._picker:                     # picker owns the gesture now
