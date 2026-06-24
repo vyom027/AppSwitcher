@@ -151,6 +151,51 @@ def list_open_titles():
     win32gui.EnumWindows(cb, None)
     return titles
 
+# ─── MRU (most-recently-used) ordering ────────────────────────────────────────
+# A background thread watches the foreground window; the switch/picker order then
+# follows real focus recency (like native Alt+Tab) — so one swipe lands on your
+# last app, and the picker lists apps newest-first.
+_mru = []                        # hwnds, most-recent first
+_mru_lock = threading.Lock()
+
+def _mru_note(hwnd):
+    if not hwnd:
+        return
+    with _mru_lock:
+        if hwnd in _mru:
+            _mru.remove(hwnd)
+        _mru.insert(0, hwnd)
+        del _mru[64:]            # cap
+
+def _mru_rank(hwnd):
+    with _mru_lock:
+        try:
+            return _mru.index(hwnd)
+        except ValueError:
+            return 1 << 30        # never-focused -> last
+
+def mru_order(windows):
+    """Stable-sort (hwnd, title) pairs by focus recency, newest first."""
+    return sorted(windows, key=lambda w: _mru_rank(w[0]))
+
+def _mru_watch():
+    last = None
+    while True:
+        try:
+            fg = win32gui.GetForegroundWindow()
+            if fg and fg != last and _is_alt_tab_window(fg):
+                _mru_note(fg); last = fg
+        except Exception:
+            pass
+        time.sleep(0.25)
+
+_mru_started = [False]
+def start_mru_watch():
+    if _mru_started[0]:
+        return
+    _mru_started[0] = True
+    threading.Thread(target=_mru_watch, daemon=True).start()
+
 class _MOUSEINPUT(ctypes.Structure):
     _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
                 ("mouseData", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
@@ -561,6 +606,7 @@ def run_ui(open_settings=False):
     _app.setQuitOnLastWindowClosed(False)   # tray app: closing settings != quit
     _bridge = _Bridge()
     load_settings()
+    start_mru_watch()                       # track focus recency for MRU order
     try:
         import kbd_hook
         kbd_hook.enabled = bool(SETTINGS.get("alt_tab", True))
@@ -944,7 +990,7 @@ class AppSwitcher:
         self._busy    = False   # one overlay at a time
 
     def refresh_windows(self):
-        wins = get_open_windows()
+        wins = mru_order(get_open_windows())     # newest-focused first
         try:
             fg  = win32gui.GetForegroundWindow()
             idx = next(i for i, (h, _) in enumerate(wins) if h == fg)
