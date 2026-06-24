@@ -274,19 +274,40 @@ def _frosted_backdrop(sw, sh):
         bg = Image.new("RGB", (sw, sh), (20, 22, 28))
     return Image.blend(bg, Image.new("RGB", (sw, sh), (12, 14, 20)), 0.45)
 
-_bg_cache = {"img": None, "ts": 0.0}
+_bg_cache = {"img": None, "ts": 0.0, "render": {}}
+_bg_lock  = threading.Lock()       # serialize ImageGrab: concurrent GDI screen
+                                   # grabs (UI + prewarm threads) can hang
 
 def prewarm_backdrop():
     sw, sh = screen_size()
-    _bg_cache["img"] = _frosted_backdrop(sw, sh)
-    _bg_cache["ts"]  = time.time()
+    with _bg_lock:                             # serialize the ImageGrab vs others
+        _bg_cache["img"] = _frosted_backdrop(sw, sh)
+        _bg_cache["ts"]  = time.time()
+        _bg_cache["render"] = {}               # invalidate render-sized copies
 
 def get_backdrop(sw, sh):
-    img = _bg_cache["img"]
-    if img is not None and img.size == (sw, sh) and time.time() - _bg_cache["ts"] < 1.5:
+    with _bg_lock:
+        img = _bg_cache["img"]
+        fresh = img is not None and img.size == (sw, sh) and time.time() - _bg_cache["ts"] < 1.5
+    if fresh:
         return img
     prewarm_backdrop()
     return _bg_cache["img"]
+
+def _render_backdrop(rw, rh):
+    """A copy of the frosted backdrop at render size — NEVER triggers ImageGrab
+    (compose runs on the UI thread and from prewarm threads; grabbing there risks
+    a GDI hang). Falls back to a solid fill until prewarm_backdrop has run."""
+    with _bg_lock:
+        base = _bg_cache["img"]
+        rcache = _bg_cache["render"]
+        r = rcache.get((rw, rh))
+        if r is None and base is not None:
+            r = base.resize((rw, rh), Image.BILINEAR).convert("RGBA")
+            rcache[(rw, rh)] = r
+    if r is None:
+        r = Image.new("RGBA", (rw, rh), (16, 18, 24, 255))
+    return r.copy()                            # caller pastes onto it
 
 # ─── Slide frame cache ────────────────────────────────────────────────────────
 # The swipe freeze was NOT the window capture — it was building two full-screen
@@ -318,26 +339,66 @@ def _grab_screen_rect(hwnd):
         l, t, r, b = win32gui.GetWindowRect(hwnd)
         if r - l <= 0 or b - t <= 0:
             return None
-        return ImageGrab.grab(bbox=(l, t, r, b), all_screens=True)
+        with _bg_lock:                           # no concurrent GDI screen grabs
+            return ImageGrab.grab(bbox=(l, t, r, b), all_screens=True)
     except Exception:
         return None
 
+_OWN_PID = os.getpid()
+
+def _is_own_window(hwnd):
+    """True if hwnd belongs to THIS process (e.g. the Settings window)."""
+    try:
+        pid = ctypes.c_ulong(0)
+        _u32.GetWindowThreadProcessId(ctypes.c_void_p(int(hwnd)), ctypes.byref(pid))
+        return pid.value == _OWN_PID
+    except Exception:
+        return False
+
+def _safe_capture(hwnd):
+    """capture_window_image, but screen-grab our OWN windows. PrintWindow sends a
+    synchronous WM_PRINT to the target; doing that to a window in our own process
+    deadlocks/hangs against our UI thread — so never PrintWindow ourselves."""
+    if _is_own_window(hwnd):
+        return _grab_screen_rect(hwnd)
+    return capture_window_image(hwnd)
+
+def _bytes_to_pixmap(data, w, h):
+    qim = QtGui.QImage(data, w, h, QtGui.QImage.Format.Format_RGBA8888)
+    return QtGui.QPixmap.fromImage(qim)          # fromImage copies; no extra .copy()
+
+def _compose_bytes(cap, hwnd, rw, rh):
+    """Full-frame (rw x rh) RGBA bytes: the window image `cap` drawn at its REAL
+    on-screen rect over the frosted backdrop. So a non-maximized window keeps its
+    actual size/position in the slide instead of being stretched to fill."""
+    wx, wy, sw, sh = work_area()
+    sx, sy = rw / float(sw), rh / float(sh)
+    canvas = _render_backdrop(rw, rh)            # cached; never grabs the screen
+    try:
+        l, t, r, b = win32gui.GetWindowRect(hwnd)
+        dw = max(1, int(round((r - l) * sx))); dh = max(1, int(round((b - t) * sy)))
+        dx = int(round((l - wx) * sx));         dy = int(round((t - wy) * sy))
+        win = cap.convert("RGBA").resize((dw, dh), Image.BILINEAR)
+        canvas.paste(win, (dx, dy), win)         # paste clips off-screen overflow
+    except Exception:
+        canvas.paste(cap.convert("RGBA").resize((rw, rh), Image.BILINEAR), (0, 0))
+    return canvas.tobytes("raw", "RGBA")
+
 def _frame_bytes(hwnd, w, h, fast=False):
-    """Capture hwnd and return raw RGBA bytes already sized to (w, h), or None.
+    """Capture hwnd and return a composed full-frame's RGBA bytes, or None.
     fast=True screen-grabs the foreground window instead of PrintWindow."""
-    img = None
+    cap = None
     if fast:
         try:
             if hwnd == _u32.GetForegroundWindow() and not win32gui.IsIconic(hwnd):
-                img = _grab_screen_rect(hwnd)
+                cap = _grab_screen_rect(hwnd)
         except Exception:
-            img = None
-    if img is None:
-        img = capture_window_image(hwnd)
-    if img is None:
+            cap = None
+    if cap is None:
+        cap = _safe_capture(hwnd)
+    if cap is None:
         return None
-    img = img.resize((w, h), Image.BILINEAR).convert("RGBA")
-    return img.tobytes("raw", "RGBA")
+    return _compose_bytes(cap, hwnd, w, h)
 
 def _cached_pixmap(hwnd, w, h):
     """Return a fresh cached QPixmap for hwnd at (w, h), or None — never builds
@@ -351,14 +412,14 @@ def _cached_pixmap(hwnd, w, h):
     return None
 
 def _cache_pixmap_from_pil(hwnd, pil, w, h):
-    """UI-thread: build a slide pixmap from an already-captured PIL frame and
-    cache it (used to warm the cache from the picker's own captures)."""
+    """UI-thread: build a slide pixmap from an already-captured PIL frame
+    (composed at the window's real rect) and cache it — warms the cache from the
+    picker's own captures."""
     try:
-        data = pil.resize((w, h), Image.BILINEAR).convert("RGBA").tobytes("raw", "RGBA")
-        qim = QtGui.QImage(data, w, h, QtGui.QImage.Format.Format_RGBA8888)
+        pix = _bytes_to_pixmap(_compose_bytes(pil, hwnd, w, h), w, h)
         with _frame_lock:
             _frame_cache[hwnd] = {"bytes": None, "w": w, "h": h,
-                                  "ts": time.time(), "pix": QtGui.QPixmap.fromImage(qim)}
+                                  "ts": time.time(), "pix": pix}
     except Exception:
         pass
 
@@ -378,8 +439,7 @@ def _get_pixmap(hwnd, w, h):
         if data is None:
             return None
         ts = now
-    qim = QtGui.QImage(data, w, h, QtGui.QImage.Format.Format_RGBA8888)
-    pix = QtGui.QPixmap.fromImage(qim)       # fromImage copies; no extra .copy()
+    pix = _bytes_to_pixmap(data, w, h)
     with _frame_lock:                        # cache pixmap, drop the big bytes buf
         _frame_cache[hwnd] = {"bytes": None, "w": w, "h": h, "ts": ts, "pix": pix}
     return pix
@@ -627,7 +687,7 @@ class SlideAnimator:
                 return p
             # else reuse the picker's PIL frame (no re-capture), or capture cold.
             if passed_img is not None:
-                return _pil2pix(passed_img.resize((rw, rh), Image.BILINEAR))
+                return _bytes_to_pixmap(_compose_bytes(passed_img, hwnd, rw, rh), rw, rh)
             return _get_pixmap(hwnd, rw, rh) or _fallback()
 
         _t1 = time.time()
@@ -697,144 +757,163 @@ class SlideAnimator:
         accent = accent_qcolor()
         step = float(SETTINGS.get("sensitivity", PICKER_STEP)) or PICKER_STEP
 
-        # Capture every window's thumbnail IN PARALLEL. Done sequentially this was
-        # n × ~150ms of PrintWindow blocking the UI thread before the picker could
-        # even appear — the 1–2s freeze on Alt+Tab with several windows open.
-        import concurrent.futures
-        _tcap = time.time()
+        # Capture every window's thumbnail off the UI thread, THEN build the picker
+        # on it. Two hazards this avoids:
+        #   • PrintWindow of our OWN windows (Settings) deadlocks the UI thread
+        #     (handled by _safe_capture -> screen grab);
+        #   • PrintWindow of an UNRESPONSIVE window blocks forever — so we capture
+        #     on daemon threads with a deadline and placeholder anything not ready,
+        #     letting a hung capture leak harmlessly instead of freezing the picker.
+        _ph = lambda: Image.new("RGB", (160, 100), (40, 42, 50))
         def _cap(hwnd):
-            im = capture_window_image(hwnd)
+            im = _safe_capture(hwnd)
             if not (im and im.width > 0 and im.height > 0):
-                im = Image.new("RGB", (160, 100), (40, 42, 50))
+                im = _ph()
             return im
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=max(1, min(8, len(windows)))) as ex:
-            imgs = list(ex.map(_cap, [h for h, _ in windows]))
-        if DEBUG:
-            print(f"[picker] captured {len(imgs)} windows in "
-                  f"{int((time.time()-_tcap)*1000)}ms", flush=True)
 
-        ov = QtOverlay(sw, sh, clickable=True)
-        _overlays.add(ov)
-        scene = ov.scene
-        scene.addPixmap(_pil2pix(get_backdrop(sw, sh))).setZValue(0)
-        hint_txt = ("hold Alt · Tab to cycle · release Alt to switch · Esc cancel"
-                    if mode == "alttab"
-                    else "move fingers to pick   ·   lift to select   ·   Esc cancel")
-        hint = scene.addText(hint_txt, QtGui.QFont("Segoe UI", 10))
-        hint.setDefaultTextColor(QtGui.QColor(225, 230, 240)); hint.setZValue(8)
-        hint.setPos((sw - hint.boundingRect().width()) / 2, 14)
+        def _build(imgs):
+            ov = QtOverlay(sw, sh, clickable=True)
+            _overlays.add(ov)
+            scene = ov.scene
+            scene.addPixmap(_pil2pix(get_backdrop(sw, sh))).setZValue(0)
+            hint_txt = ("hold Alt · Tab to cycle · release Alt to switch · Esc cancel"
+                        if mode == "alttab"
+                        else "move fingers to pick   ·   lift to select   ·   Esc cancel")
+            hint = scene.addText(hint_txt, QtGui.QFont("Segoe UI", 10))
+            hint.setDefaultTextColor(QtGui.QColor(225, 230, 240)); hint.setZValue(8)
+            hint.setPos((sw - hint.boundingRect().width()) / 2, 14)
 
-        LayoutCls = layouts.LAYOUTS.get(SETTINGS.get("layout", "dock"), layouts.DockLayout)
-        try:
-            layout = LayoutCls(scene, imgs, windows, sw, sh, accent)
-            layout.build()
-        except Exception as e:
-            print("[layout] build failed, fallback to dock:", e)
-            layout = layouts.DockLayout(scene, imgs, windows, sw, sh, accent)
-            layout.build()
+            LayoutCls = layouts.LAYOUTS.get(SETTINGS.get("layout", "dock"), layouts.DockLayout)
+            try:
+                layout = LayoutCls(scene, imgs, windows, sw, sh, accent)
+                layout.build()
+            except Exception as e:
+                print("[layout] build failed, fallback to dock:", e)
+                layout = layouts.DockLayout(scene, imgs, windows, sw, sh, accent)
+                layout.build()
 
-        state = {"focus": float(current_idx), "selected": current_idx, "done": False}
-        layout.update(state["focus"], state["selected"])
+            state = {"focus": float(current_idx), "selected": current_idx, "done": False}
+            layout.update(state["focus"], state["selected"])
 
-        # Warm the slide cache from the frames we already captured, so the slide
-        # after selection is instant — matters most for keyboard Alt+Tab, which
-        # gets no gesture prewarm. Built lazily (one per event-loop turn) so it
-        # never delays the picker fade-in; reuses imgs, no re-capture.
-        _, _, _fsw, _fsh = work_area()
-        _rw, _rh = _render_size(_fsw, _fsh)
-        def _precache(i=0):
-            if ov._closed or i >= len(windows):
-                return
-            _cache_pixmap_from_pil(windows[i][0], imgs[i], _rw, _rh)
-            QtCore.QTimer.singleShot(0, lambda: _precache(i + 1))
-        QtCore.QTimer.singleShot(0, _precache)
+            # Warm the slide cache from the frames we already captured, so the slide
+            # after selection is instant — matters most for keyboard Alt+Tab, which
+            # gets no gesture prewarm. Built lazily (one per event-loop turn) so it
+            # never delays the picker fade-in; reuses imgs, no re-capture.
+            _, _, _fsw, _fsh = work_area()
+            _rw, _rh = _render_size(_fsw, _fsh)
+            def _precache(i=0):
+                if ov._closed or i >= len(windows):
+                    return
+                _cache_pixmap_from_pil(windows[i][0], imgs[i], _rw, _rh)
+                QtCore.QTimer.singleShot(0, lambda: _precache(i + 1))
+            QtCore.QTimer.singleShot(0, _precache)
 
-        timer = QtCore.QTimer(ov)
-        def finish(idx):
-            if state["done"]:
-                return
-            state["done"] = True
-            _alttab_ctl[0] = None
-            timer.stop(); ov.destroy_overlay(); on_result(idx, imgs)
-
-        import gesture_hook as _gh
-        VK = {"esc": 0x1B, "left": 0x25, "right": 0x27, "enter": 0x0D,
-              "lmb": 0x01, "alt": 0x12}
-        edge = {"down": False}
-        fnav = {"base_x": None, "base_focus": float(current_idx), "armed": False}
-        alt_state = {"down": True}        # Alt is held when alttab picker opens
-        def held(vk):
-            return _u32.GetAsyncKeyState(vk) & 0x8000
-
-        # alttab mode: external stepper advances selection on each Alt+Tab
-        if mode == "alttab":
-            def _step(direction):
+            timer = QtCore.QTimer(ov)
+            def finish(idx):
                 if state["done"]:
                     return
-                state["selected"] = (state["selected"] + direction) % n
-                state["focus"] = float(state["selected"])
-                layout.update(state["focus"], state["selected"])
-            _alttab_ctl[0] = _step
+                state["done"] = True
+                _alttab_ctl[0] = None
+                timer.stop(); ov.destroy_overlay(); on_result(idx, imgs)
 
-        def poll():
-            if state["done"] or ov._closed:
-                return
+            import gesture_hook as _gh
+            VK = {"esc": 0x1B, "left": 0x25, "right": 0x27, "enter": 0x0D,
+                  "lmb": 0x01, "alt": 0x12}
+            edge = {"down": False}
+            fnav = {"base_x": None, "base_focus": float(current_idx), "armed": False}
+            alt_state = {"down": True}        # Alt is held when alttab picker opens
+            def held(vk):
+                return _u32.GetAsyncKeyState(vk) & 0x8000
+
+            # alttab mode: external stepper advances selection on each Alt+Tab
             if mode == "alttab":
-                a = held(VK["alt"])
-                if not a and alt_state["down"]:      # Alt released -> commit
-                    finish(state["selected"]); return
-                alt_state["down"] = a
-                if held(VK["esc"]):
-                    finish(None); return
-                if held(VK["lmb"]):
-                    pt = ctypes.wintypes.POINT(); _u32.GetCursorPos(ctypes.byref(pt))
-                    hit = layout.hit_test(pt.x, pt.y)
-                    if hit is not None:
-                        finish(hit); return
-                return
-            live = _gh.LIVE
-            if live["count"] >= 2:
-                fnav["armed"] = True
-                if fnav["base_x"] is None:
-                    fnav["base_x"] = live["avg_x"]; fnav["base_focus"] = state["focus"]
-                raw = fnav["base_focus"] + (live["avg_x"] - fnav["base_x"]) / step
-                focus = max(0.0, min(n - 1, raw))
-                if abs(focus - state["focus"]) > 0.002:
-                    state["focus"] = focus
-                    state["selected"] = int(round(focus))
-                    layout.update(focus, state["selected"])
-            elif live["count"] == 0 and fnav["armed"]:
-                finish(state["selected"]); return
-            esc, left, right, enter, lmb = (held(VK["esc"]), held(VK["left"]),
-                                            held(VK["right"]), held(VK["enter"]), held(VK["lmb"]))
-            any_down = esc or left or right or enter or lmb
-            if any_down and not edge["down"]:
-                edge["down"] = True
-                if esc:
-                    finish(None); return
-                if left:
-                    state["selected"] = (state["selected"] - 1) % n
-                    state["focus"] = float(state["selected"]); layout.update(state["focus"], state["selected"])
-                elif right:
-                    state["selected"] = (state["selected"] + 1) % n
-                    state["focus"] = float(state["selected"]); layout.update(state["focus"], state["selected"])
-                elif enter:
-                    finish(state["selected"]); return
-                elif lmb:
-                    pt = ctypes.wintypes.POINT(); _u32.GetCursorPos(ctypes.byref(pt))
-                    hit = layout.hit_test(pt.x, pt.y)
-                    finish(hit if hit is not None else state["selected"]); return
-            elif not any_down:
-                edge["down"] = False
+                def _step(direction):
+                    if state["done"]:
+                        return
+                    state["selected"] = (state["selected"] + direction) % n
+                    state["focus"] = float(state["selected"])
+                    layout.update(state["focus"], state["selected"])
+                _alttab_ctl[0] = _step
 
-        ov.reveal(0.0)
-        fade = QtCore.QPropertyAnimation(ov, b"windowOpacity", ov)
-        fade.setStartValue(0.0); fade.setEndValue(1.0); fade.setDuration(130)
-        fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-        ov._fade = fade; fade.start()
-        timer.timeout.connect(poll); timer.start(12)
-        QtCore.QTimer.singleShot(12000, lambda: finish(None))
+            def poll():
+                if state["done"] or ov._closed:
+                    return
+                if mode == "alttab":
+                    a = held(VK["alt"])
+                    if not a and alt_state["down"]:      # Alt released -> commit
+                        finish(state["selected"]); return
+                    alt_state["down"] = a
+                    if held(VK["esc"]):
+                        finish(None); return
+                    if held(VK["lmb"]):
+                        pt = ctypes.wintypes.POINT(); _u32.GetCursorPos(ctypes.byref(pt))
+                        hit = layout.hit_test(pt.x, pt.y)
+                        if hit is not None:
+                            finish(hit); return
+                    return
+                live = _gh.LIVE
+                if live["count"] >= 2:
+                    fnav["armed"] = True
+                    if fnav["base_x"] is None:
+                        fnav["base_x"] = live["avg_x"]; fnav["base_focus"] = state["focus"]
+                    raw = fnav["base_focus"] + (live["avg_x"] - fnav["base_x"]) / step
+                    focus = max(0.0, min(n - 1, raw))
+                    if abs(focus - state["focus"]) > 0.002:
+                        state["focus"] = focus
+                        state["selected"] = int(round(focus))
+                        layout.update(focus, state["selected"])
+                elif live["count"] == 0 and fnav["armed"]:
+                    finish(state["selected"]); return
+                esc, left, right, enter, lmb = (held(VK["esc"]), held(VK["left"]),
+                                                held(VK["right"]), held(VK["enter"]), held(VK["lmb"]))
+                any_down = esc or left or right or enter or lmb
+                if any_down and not edge["down"]:
+                    edge["down"] = True
+                    if esc:
+                        finish(None); return
+                    if left:
+                        state["selected"] = (state["selected"] - 1) % n
+                        state["focus"] = float(state["selected"]); layout.update(state["focus"], state["selected"])
+                    elif right:
+                        state["selected"] = (state["selected"] + 1) % n
+                        state["focus"] = float(state["selected"]); layout.update(state["focus"], state["selected"])
+                    elif enter:
+                        finish(state["selected"]); return
+                    elif lmb:
+                        pt = ctypes.wintypes.POINT(); _u32.GetCursorPos(ctypes.byref(pt))
+                        hit = layout.hit_test(pt.x, pt.y)
+                        finish(hit if hit is not None else state["selected"]); return
+                elif not any_down:
+                    edge["down"] = False
+
+            ov.reveal(0.0)
+            fade = QtCore.QPropertyAnimation(ov, b"windowOpacity", ov)
+            fade.setStartValue(0.0); fade.setEndValue(1.0); fade.setDuration(130)
+            fade.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+            ov._fade = fade; fade.start()
+            timer.timeout.connect(poll); timer.start(12)
+            QtCore.QTimer.singleShot(12000, lambda: finish(None))
+
+        def _capture_then_build():
+            _tcap = time.time()
+            hwnds = [h for h, _ in windows]
+            imgs = [None] * n
+            def _worker(i):
+                imgs[i] = _cap(hwnds[i])
+            ths = [threading.Thread(target=_worker, args=(i,), daemon=True)
+                   for i in range(n)]
+            for t in ths:
+                t.start()
+            deadline = time.time() + 1.0          # cap the wait; placeholder the rest
+            for t in ths:
+                t.join(timeout=max(0.0, deadline - time.time()))
+            ready = sum(im is not None for im in imgs)
+            imgs = [im if im is not None else _ph() for im in imgs]
+            if DEBUG:
+                print(f"[picker] captured {ready}/{n} windows in "
+                      f"{int((time.time()-_tcap)*1000)}ms (rest placeholdered)", flush=True)
+            post(lambda: _build(imgs))
+        threading.Thread(target=_capture_then_build, daemon=True).start()
 
 
 # ─── App Switcher Core ────────────────────────────────────────────────────────
