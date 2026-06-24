@@ -2,7 +2,7 @@
 ; Build: ISCC.exe installer.iss   (after PyInstaller produces dist\AppSwitcher)
 
 #define AppName "AppSwitcher"
-#define AppVersion "1.4"
+#define AppVersion "1.5"
 #define AppExe "AppSwitcher.exe"
 
 [Setup]
