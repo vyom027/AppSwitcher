@@ -54,6 +54,21 @@ class BaseLayout:
     def update(self, focus, selected): ...
     def hit_test(self, px, py): return None
 
+    # live thumbnails: swap one card's image in place (same size/position).
+    # build() sets self._cardwh = (w, h, radius) for this to work.
+    def refresh_image(self, i, im):
+        if im is None or not (0 <= i < self.n) or i >= len(self.items):
+            return
+        self.imgs[i] = im
+        cw = getattr(self, "_cardwh", None)
+        if cw:
+            self.pix[i] = _card_pix(im, *cw)
+            self.items[i].setPixmap(self.pix[i])
+        p = getattr(self, "preview", None)        # Dock/Hero big preview
+        if p is not None:
+            p.imgs[i] = im
+            p.cache.pop(i, None)                  # force re-render
+
 
 # ── shared big-preview widget (used by Dock + Hero) ──────────────────────────
 class _Preview:
@@ -111,6 +126,7 @@ class DockLayout(BaseLayout):
         title_y = self.basey - maxh - 50
         self.preview = _Preview(self.scene, self.imgs, self.windows, sw, 52,
                                 title_y - 22 - 52, int(sw * 0.88), self.accent, title_y)
+        self._cardwh = (self.DOCK_W, self.DOCK_H, 12)
         self.pix = [_card_pix(im, self.DOCK_W, self.DOCK_H, 12) for im in self.imgs]
         for i in range(self.n):
             it = self.scene.addPixmap(self.pix[i]); it.setZValue(2)
@@ -157,6 +173,7 @@ class RowLayout(BaseLayout):
         self.cw, self.ch = int(self.CW * fit), int(self.CH * fit)
         self.gap = int(self.GAP * fit)
         self.x0 = (self.sw - (self.n * self.cw + (self.n - 1) * self.gap)) / 2
+        self._cardwh = (self.cw, self.ch, 14)
         self.pix = [_card_pix(im, self.cw, self.ch, 14) for im in self.imgs]
         for i in range(self.n):
             it = self.scene.addPixmap(self.pix[i]); it.setZValue(2)
@@ -207,6 +224,7 @@ class GridLayout(BaseLayout):
         self.gh = self.rows * self.th + (self.rows - 1) * gap
         self.ox = (sw - self.gw) / 2
         self.oy = (sh - self.gh) / 2 - 10
+        self._cardwh = (self.tw, self.th, 14)
         self.pix = [_card_pix(im, self.tw, self.th, 14) for im in self.imgs]
         for i in range(self.n):
             it = self.scene.addPixmap(self.pix[i]); it.setZValue(2)
@@ -244,6 +262,7 @@ class CoverflowLayout(BaseLayout):
 
     def build(self):
         self.cy = self.sh / 2 - 20
+        self._cardwh = (self.CW, self.CH, 16)
         self.pix = [_card_pix(im, self.CW, self.CH, 16) for im in self.imgs]
         for i in range(self.n):
             it = self.scene.addPixmap(self.pix[i])
@@ -287,6 +306,7 @@ class FanLayout(BaseLayout):
         self.cy = self.sh / 2 - 30
         self.arc = self.sw * 0.95
         self.pivot_y = self.cy + self.arc
+        self._cardwh = (self.CW, self.CH, 16)
         self.pix = [_card_pix(im, self.CW, self.CH, 16) for im in self.imgs]
         for i in range(self.n):
             it = self.scene.addPixmap(self.pix[i])
@@ -322,6 +342,7 @@ class WalletLayout(BaseLayout):
     def build(self):
         self.cw = int(self.sw * 0.46); self.ch = int(self.cw * 0.46)
         self.cy = self.sh / 2 - 10
+        self._cardwh = (self.cw, self.ch, 18)
         self.pix = [_card_pix(im, self.cw, self.ch, 18) for im in self.imgs]
         for i in range(self.n):
             it = self.scene.addPixmap(self.pix[i])
@@ -360,6 +381,7 @@ class HeroLayout(BaseLayout):
         title_y = self.basey - self.FH - 44
         self.preview = _Preview(self.scene, self.imgs, self.windows, sw, 46,
                                 title_y - 18 - 46, int(sw * 0.9), self.accent, title_y)
+        self._cardwh = (self.FW, self.FH, 10)
         self.pix = [_card_pix(im, self.FW, self.FH, 10) for im in self.imgs]
         total = self.n * self.FW + (self.n - 1) * self.GAP
         self.x0 = (sw - total) / 2

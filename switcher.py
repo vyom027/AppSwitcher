@@ -871,6 +871,40 @@ class SlideAnimator:
                 QtCore.QTimer.singleShot(0, lambda: _precache(i + 1))
             QtCore.QTimer.singleShot(0, _precache)
 
+            # Semi-live thumbnails: re-capture the windows in the background every
+            # ~0.4s while the picker is open and swap the images in place. Keeps
+            # every layout (dock magnify, reflection, etc.); hung captures leak
+            # harmlessly (daemon + deadline) and just keep the previous frame.
+            def _live_loop():
+                while not ov._closed and not state["done"]:
+                    time.sleep(0.4)
+                    if ov._closed or state["done"]:
+                        break
+                    fresh = [None] * len(windows)
+                    cths = [threading.Thread(
+                        target=lambda i=i: fresh.__setitem__(i, _safe_capture(windows[i][0])),
+                        daemon=True) for i in range(len(windows))]
+                    for ct in cths:
+                        ct.start()
+                    dl = time.time() + 0.6
+                    for ct in cths:
+                        ct.join(timeout=max(0.0, dl - time.time()))
+                    if ov._closed or state["done"]:
+                        break
+                    def _apply(f=fresh):
+                        if ov._closed or state["done"]:
+                            return
+                        changed = False
+                        for i, im in enumerate(f):
+                            if im is not None and im.width > 0 and im.height > 0:
+                                imgs[i] = im
+                                layout.refresh_image(i, im)
+                                changed = True
+                        if changed:
+                            layout.update(state["focus"], state["selected"])
+                    post(_apply)
+            threading.Thread(target=_live_loop, daemon=True).start()
+
             timer = QtCore.QTimer(ov)
             def finish(idx):
                 if state["done"]:
