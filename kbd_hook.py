@@ -15,6 +15,8 @@ WM_KEYDOWN, WM_KEYUP       = 0x0100, 0x0101
 WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0104, 0x0105
 VK_TAB, VK_MENU, VK_LMENU, VK_RMENU = 0x09, 0x12, 0xA4, 0xA5
 VK_SHIFT, VK_ESCAPE = 0x10, 0x1B
+GWL_STYLE  = -16
+WS_CAPTION = 0x00C00000
 
 LRESULT  = ctypes.c_ssize_t
 HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wt.WPARAM, wt.LPARAM)
@@ -30,6 +32,9 @@ user32.SetWindowsHookExW.restype  = wt.HHOOK
 user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, ctypes.c_void_p, wt.DWORD]
 user32.UnhookWindowsHookEx.argtypes = [wt.HHOOK]
 ctypes.windll.kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+user32.GetWindowLongW.restype  = ctypes.c_long
+user32.GetWindowLongW.argtypes = [wt.HWND, ctypes.c_int]
+user32.IsZoomed.argtypes = [wt.HWND]
 
 _hook = None
 _proc = None
@@ -40,14 +45,23 @@ _alt = False
 
 
 def _foreground_is_fullscreen():
-    """True if the foreground window covers the WHOLE monitor (likely a
-    fullscreen game) — then we pass Alt+Tab through to Windows."""
+    """True only for a real fullscreen game — a BORDERLESS window covering the
+    whole monitor — then we pass Alt+Tab through to Windows. A normal MAXIMIZED
+    window also covers the monitor but keeps its title bar (WS_CAPTION) and the
+    maximized state, so we must NOT treat it as fullscreen (else Alt+Tab over any
+    maximized app falls back to Windows' own switcher)."""
     try:
         h = user32.GetForegroundWindow()
         if not h:
             return False
+        hwnd = wt.HWND(h)
+        if user32.IsZoomed(hwnd):
+            return False            # maximized normal window, not a game
+        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+        if style & WS_CAPTION:
+            return False            # has a title bar -> windowed, not fullscreen
         r = wt.RECT()
-        user32.GetWindowRect(wt.HWND(h), ctypes.byref(r))
+        user32.GetWindowRect(hwnd, ctypes.byref(r))
         mw = user32.GetSystemMetrics(0); mh = user32.GetSystemMetrics(1)
         return (r.left <= 0 and r.top <= 0 and
                 (r.right - r.left) >= mw and (r.bottom - r.top) >= mh)
