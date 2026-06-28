@@ -1022,6 +1022,7 @@ class AppSwitcher:
         self.current  = 0
         self._lock    = threading.Lock()
         self._busy    = False   # one overlay at a time
+        self._pending_dir = None  # an Alt+Tab that arrived mid-animation, queued
 
     def refresh_windows(self):
         wins = mru_order(get_open_windows())     # newest-focused first
@@ -1042,8 +1043,17 @@ class AppSwitcher:
             return True
 
     def _release(self):
+        pend = None
         with self._lock:
             self._busy = False
+            if self._pending_dir is not None:
+                pend = self._pending_dir
+                self._pending_dir = None
+        # A second Alt+Tab landed while we were busy animating the last switch.
+        # The picker is already gone, so just slide one more step (Alt is almost
+        # always released by now) instead of dropping the press.
+        if pend is not None:
+            post(lambda d=pend: self.switch(d))
 
     def switch(self, direction):
         if not self._acquire():
@@ -1099,6 +1109,13 @@ class AppSwitcher:
             _alttab_ctl[0](direction)
             return
         if not self._acquire():
+            # Busy animating the previous switch — queue this press so it fires
+            # the moment the lock frees, instead of being dropped (the cause of
+            # "sometimes Alt+Tab does nothing, I have to press twice").
+            with self._lock:
+                self._pending_dir = direction
+            if DEBUG:
+                print(f"[alttab] busy -> queued dir={direction}", flush=True)
             return
         try:
             self.refresh_windows()
