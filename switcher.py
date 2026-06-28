@@ -56,7 +56,35 @@ SETTINGS  = {
     "warn_dismissed": False,  # user dismissed the 3-finger warning
     "alt_tab":    True,       # replace Windows Alt+Tab with this switcher
     "blocklist":  [],         # window titles to hide from the switcher
+    "hotkey_mod": "alt",      # switch chord modifier: "alt" or "ctrl"
+    "hotkey_key": 0x09,       # switch chord trigger vkCode (0x09 = Tab)
 }
+
+# Generic vkCode of the chord modifier, polled by the picker to detect "release
+# to commit". Kept in sync with SETTINGS by apply_hotkey(). 0x12=Alt, 0x11=Ctrl.
+HOTKEY_MOD_VK = 0x12
+
+# Trigger keys offered in Settings: label -> vkCode.
+HOTKEY_KEYS = {"Tab": 0x09, "`": 0xC0, "Space": 0x20,
+               "Q": 0x51, "E": 0x45, "Z": 0x5A}
+_VK_TO_KEY = {v: k for k, v in HOTKEY_KEYS.items()}
+
+def apply_hotkey():
+    """Push the configured switch chord into the keyboard hook + picker."""
+    global HOTKEY_MOD_VK
+    mod = str(SETTINGS.get("hotkey_mod", "alt")).lower()
+    HOTKEY_MOD_VK = 0x11 if mod == "ctrl" else 0x12
+    try:
+        import kbd_hook
+        kbd_hook.configure(mod, int(SETTINGS.get("hotkey_key", 0x09)))
+    except Exception:
+        pass
+
+def hotkey_labels():
+    """(modifier, key) display names for the current chord, e.g. ('Alt','Tab')."""
+    mod = "Ctrl" if str(SETTINGS.get("hotkey_mod", "alt")).lower() == "ctrl" else "Alt"
+    key = _VK_TO_KEY.get(int(SETTINGS.get("hotkey_key", 0x09)), "Tab")
+    return mod, key
 
 def load_settings():
     try:
@@ -417,12 +445,38 @@ def _is_own_window(hwnd):
     except Exception:
         return False
 
+_own_ph_cache = None
+
+def _own_placeholder():
+    """A STATIC card for our own windows (Settings). We must never screen-grab
+    them: if a grab happens while the picker is on screen it captures the picker
+    itself, and the 0.4s live-thumbnail refresh deepens that hall-of-mirrors
+    every tick ('it continues to make like that')."""
+    global _own_ph_cache
+    if _own_ph_cache is not None:
+        return _own_ph_cache
+    w, h = 480, 300
+    img = Image.new("RGB", (w, h), (26, 30, 38))
+    d = ImageDraw.Draw(img)
+    r, g, b = SETTINGS.get("accent", [150, 205, 255])
+    d.rectangle([0, 0, w, 8], fill=(r, g, b))
+    txt = "AppSwitcher"
+    try:
+        from PIL import ImageFont
+        f = ImageFont.truetype("segoeui.ttf", 34)
+        tw = d.textlength(txt, font=f)
+        d.text(((w - tw) / 2, h / 2 - 24), txt, fill=(235, 240, 248), font=f)
+    except Exception:
+        d.text((w / 2 - 50, h / 2 - 8), txt, fill=(235, 240, 248))
+    _own_ph_cache = img
+    return img
+
 def _safe_capture(hwnd):
-    """capture_window_image, but screen-grab our OWN windows. PrintWindow sends a
-    synchronous WM_PRINT to the target; doing that to a window in our own process
-    deadlocks/hangs against our UI thread — so never PrintWindow ourselves."""
+    """capture_window_image, but our OWN windows get a static placeholder.
+    PrintWindow on our own process deadlocks our UI thread, and screen-grabbing
+    them recurses into the visible picker — so do neither for our windows."""
     if _is_own_window(hwnd):
-        return _grab_screen_rect(hwnd)
+        return _own_placeholder()
     return capture_window_image(hwnd)
 
 def _bytes_to_pixmap(data, w, h):
@@ -450,7 +504,7 @@ def _frame_bytes(hwnd, w, h, fast=False):
     """Capture hwnd and return a composed full-frame's RGBA bytes, or None.
     fast=True screen-grabs the foreground window instead of PrintWindow."""
     cap = None
-    if fast:
+    if fast and not _is_own_window(hwnd):
         try:
             if hwnd == _u32.GetForegroundWindow() and not win32gui.IsIconic(hwnd):
                 cap = _grab_screen_rect(hwnd)
@@ -610,6 +664,7 @@ def run_ui(open_settings=False):
     try:
         import kbd_hook
         kbd_hook.enabled = bool(SETTINGS.get("alt_tab", True))
+        apply_hotkey()                      # push the configured chord into the hook
     except Exception:
         pass
     try:
@@ -838,22 +893,31 @@ class SlideAnimator:
             ov = QtOverlay(sw, sh, clickable=True)
             _overlays.add(ov)
             scene = ov.scene
-            scene.addPixmap(_pil2pix(get_backdrop(sw, sh))).setZValue(0)
-            hint_txt = ("hold Alt · Tab to cycle · release Alt to switch · Esc cancel"
+
+            _mod, _key = hotkey_labels()
+            hint_txt = (f"hold {_mod} · {_key} to cycle · release {_mod} to switch"
+                        " · middle-click to close · Esc cancel"
                         if mode == "alttab"
-                        else "move fingers to pick   ·   lift to select   ·   Esc cancel")
-            hint = scene.addText(hint_txt, QtGui.QFont("Segoe UI", 10))
-            hint.setDefaultTextColor(QtGui.QColor(225, 230, 240)); hint.setZValue(8)
-            hint.setPos((sw - hint.boundingRect().width()) / 2, 14)
+                        else "move fingers to pick · lift to select"
+                             " · middle-click to close · Esc cancel")
+
+            def _add_decor():
+                scene.addPixmap(_pil2pix(get_backdrop(sw, sh))).setZValue(0)
+                h = scene.addText(hint_txt, QtGui.QFont("Segoe UI", 10))
+                h.setDefaultTextColor(QtGui.QColor(225, 230, 240)); h.setZValue(8)
+                h.setPos((sw - h.boundingRect().width()) / 2, 14)
 
             LayoutCls = layouts.LAYOUTS.get(SETTINGS.get("layout", "dock"), layouts.DockLayout)
-            try:
-                layout = LayoutCls(scene, imgs, windows, sw, sh, accent)
-                layout.build()
-            except Exception as e:
-                print("[layout] build failed, fallback to dock:", e)
-                layout = layouts.DockLayout(scene, imgs, windows, sw, sh, accent)
-                layout.build()
+            def _make_layout():
+                try:
+                    lay = LayoutCls(scene, imgs, windows, sw, sh, accent); lay.build()
+                except Exception as e:
+                    print("[layout] build failed, fallback to dock:", e)
+                    lay = layouts.DockLayout(scene, imgs, windows, sw, sh, accent); lay.build()
+                return lay
+
+            _add_decor()
+            layout = _make_layout()
 
             state = {"focus": float(current_idx), "selected": current_idx, "done": False}
             layout.update(state["focus"], state["selected"])
@@ -911,16 +975,33 @@ class SlideAnimator:
                     return
                 state["done"] = True
                 _alttab_ctl[0] = None
-                timer.stop(); ov.destroy_overlay(); on_result(idx, imgs)
+                # Pass the picker's CURRENT lists — windows may have shrunk via
+                # middle-click close, so the caller must not use its stale copy.
+                timer.stop(); ov.destroy_overlay(); on_result(idx, imgs, windows)
 
             import gesture_hook as _gh
             VK = {"esc": 0x1B, "left": 0x25, "right": 0x27, "enter": 0x0D,
-                  "lmb": 0x01, "alt": 0x12}
+                  "lmb": 0x01, "mmb": 0x04, "mod": HOTKEY_MOD_VK}
             edge = {"down": False}
+            medge = {"down": False}           # middle-click edge (close window)
             fnav = {"base_x": None, "base_focus": float(current_idx), "armed": False}
-            alt_state = {"down": True}        # Alt is held when alttab picker opens
+            alt_state = {"down": True}        # modifier is held when alttab opens
             def held(vk):
                 return _u32.GetAsyncKeyState(vk) & 0x8000
+
+            def _do_close():
+                """Middle-click a tile: send it WM_CLOSE, then dismiss the picker
+                (reopen to close another). Dismissing avoids rebuilding the live
+                scene in place, which stacked leftover items."""
+                pt = ctypes.wintypes.POINT(); _u32.GetCursorPos(ctypes.byref(pt))
+                hit = layout.hit_test(pt.x, pt.y)
+                if hit is None or not (0 <= hit < len(windows)):
+                    return
+                try:
+                    win32gui.PostMessage(windows[hit][0], win32con.WM_CLOSE, 0, 0)
+                except Exception:
+                    pass
+                finish(None)                  # close window, dismiss picker
 
             # alttab mode: external stepper advances selection on each Alt+Tab
             if mode == "alttab":
@@ -935,9 +1016,15 @@ class SlideAnimator:
             def poll():
                 if state["done"] or ov._closed:
                     return
+                if held(VK["mmb"]):                       # middle-click -> close
+                    if not medge["down"]:
+                        medge["down"] = True
+                        _do_close()
+                    return
+                medge["down"] = False
                 if mode == "alttab":
-                    a = held(VK["alt"])
-                    if not a and alt_state["down"]:      # Alt released -> commit
+                    a = held(VK["mod"])
+                    if not a and alt_state["down"]:      # modifier released -> commit
                         finish(state["selected"]); return
                     alt_state["down"] = a
                     if held(VK["esc"]):
@@ -1083,19 +1170,22 @@ class AppSwitcher:
             self.refresh_windows()
             with self._lock:
                 wins = list(self.windows); cur = self.current   # foreground at 0
-            def on_result(idx, imgs=None):
-                if idx is None or len(wins) < 2 or idx == cur:
-                    if idx is not None:
-                        with self._lock:
-                            self.current = idx
-                        bring_to_front(wins[idx][0])
+            def on_result(idx, imgs=None, rwins=None):
+                w = rwins if rwins is not None else wins   # picker's live list
+                if idx is None or not (0 <= idx < len(w)):
+                    self._release(); return
+                c = _fg_index(w)
+                if len(w) < 2 or idx == c:
+                    with self._lock:
+                        self.current = idx
+                    bring_to_front(w[idx][0])
                     self._release(); return
                 with self._lock:
                     self.current = idx
-                direction = 1 if idx > cur else -1
-                ci = imgs[cur] if imgs else None
-                ni = imgs[idx] if imgs else None
-                self.animator.slide_transition(direction, wins[cur][0], wins[idx][0],
+                direction = 1 if idx > c else -1
+                ci = imgs[c]   if imgs and c   < len(imgs) else None
+                ni = imgs[idx] if imgs and idx < len(imgs) else None
+                self.animator.slide_transition(direction, w[c][0], w[idx][0],
                                                on_done=self._release,
                                                cur_img=ci, nxt_img=ni)
             self.animator.show_picker(wins, cur, on_result)
@@ -1124,15 +1214,19 @@ class AppSwitcher:
             if len(wins) < 2:
                 self._release(); return
             start = (cur + direction) % len(wins)   # first Tab highlights next app
-            def on_result(idx, imgs=None):
-                if idx is None or idx == cur:
+            def on_result(idx, imgs=None, rwins=None):
+                w = rwins if rwins is not None else wins   # picker's live list
+                if idx is None or not (0 <= idx < len(w)):
+                    self._release(); return
+                c = _fg_index(w)
+                if idx == c:
                     self._release(); return
                 with self._lock:
                     self.current = idx
-                d = 1 if idx >= cur else -1
-                ci = imgs[cur] if imgs else None     # reuse picker captures =>
-                ni = imgs[idx] if imgs else None     # animation starts instantly
-                self.animator.slide_transition(d, wins[cur][0], wins[idx][0],
+                d = 1 if idx >= c else -1
+                ci = imgs[c]   if imgs and c   < len(imgs) else None
+                ni = imgs[idx] if imgs and idx < len(imgs) else None
+                self.animator.slide_transition(d, w[c][0], w[idx][0],
                                                on_done=self._release,
                                                cur_img=ci, nxt_img=ni)
             self.animator.show_picker(wins, start, on_result, mode="alttab")
@@ -1155,6 +1249,15 @@ class AppSwitcher:
         except Exception as e:
             print("[preview] error:", e)
             self._release()
+
+
+def _fg_index(wins, default=0):
+    """Index of the current foreground window within wins, else default."""
+    try:
+        fg = win32gui.GetForegroundWindow()
+        return next(i for i, (h, _) in enumerate(wins) if h == fg)
+    except Exception:
+        return default
 
 
 _switcher = AppSwitcher()

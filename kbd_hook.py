@@ -14,9 +14,34 @@ WH_KEYBOARD_LL = 13
 WM_KEYDOWN, WM_KEYUP       = 0x0100, 0x0101
 WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0104, 0x0105
 VK_TAB, VK_MENU, VK_LMENU, VK_RMENU = 0x09, 0x12, 0xA4, 0xA5
+VK_CONTROL, VK_LCONTROL, VK_RCONTROL = 0x11, 0xA2, 0xA3
 VK_SHIFT, VK_ESCAPE = 0x10, 0x1B
 GWL_STYLE  = -16
 WS_CAPTION = 0x00C00000
+
+# ─── Configurable trigger chord ───────────────────────────────────────────────
+# Default = Alt+Tab. `configure()` swaps the modifier (Alt or Ctrl) and the
+# trigger key. _MOD_VKS lists every vkCode that counts as the modifier (L/R +
+# generic). _NEUTRALIZE taps Ctrl after swallowing so a lone modifier release
+# doesn't fire its own action (Alt -> menu bar); only Alt needs it.
+_MOD_VKS     = (VK_MENU, VK_LMENU, VK_RMENU)
+_TRIGGER_VK  = VK_TAB
+_NEUTRALIZE  = True
+
+
+def configure(mod="alt", trigger_vk=VK_TAB):
+    """Set the global switch chord. mod in {'alt','ctrl'}."""
+    global _MOD_VKS, _TRIGGER_VK, _NEUTRALIZE
+    if str(mod).lower() == "ctrl":
+        _MOD_VKS = (VK_CONTROL, VK_LCONTROL, VK_RCONTROL)
+        _NEUTRALIZE = False          # Ctrl alone does nothing -> no neutralizer
+    else:
+        _MOD_VKS = (VK_MENU, VK_LMENU, VK_RMENU)
+        _NEUTRALIZE = True
+    try:
+        _TRIGGER_VK = int(trigger_vk)
+    except Exception:
+        _TRIGGER_VK = VK_TAB
 
 LRESULT  = ctypes.c_ssize_t
 HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wt.WPARAM, wt.LPARAM)
@@ -41,7 +66,7 @@ _proc = None
 _on_alttab = None
 enabled = True
 DEBUG = False
-_alt = False
+_mod_down = False
 
 
 def _foreground_is_fullscreen():
@@ -70,31 +95,33 @@ def _foreground_is_fullscreen():
 
 
 def _callback(nCode, wParam, lParam):
-    global _alt
+    global _mod_down
     if nCode == 0 and enabled:
         kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
         vk = kb.vkCode
         down = wParam == WM_KEYDOWN or wParam == WM_SYSKEYDOWN
-        if vk in (VK_MENU, VK_LMENU, VK_RMENU):
-            _alt = down
-        elif vk == VK_TAB and down and _alt:
+        if vk in _MOD_VKS:
+            _mod_down = down
+        elif vk == _TRIGGER_VK and down and _mod_down:
             if not _foreground_is_fullscreen():
                 shift = user32.GetAsyncKeyState(VK_SHIFT) & 0x8000
                 if DEBUG:
-                    print(f"[kbd_hook] Alt+Tab swallowed dir={-1 if shift else 1}", flush=True)
-                # Ctrl tap so the swallowed Tab doesn't leave Alt "alone" ->
-                # avoids the focused app's menu bar activating on Alt release.
-                try:
-                    user32.keybd_event(0x11, 0, 0, 0)   # Ctrl down
-                    user32.keybd_event(0x11, 0, 2, 0)   # Ctrl up
-                except Exception:
-                    pass
+                    print(f"[kbd_hook] chord swallowed dir={-1 if shift else 1}", flush=True)
+                # Tap Ctrl so the swallowed trigger doesn't leave the modifier
+                # "alone" -> avoids Alt activating the focused app's menu bar.
+                # Only needed for Alt (Ctrl-alone does nothing).
+                if _NEUTRALIZE:
+                    try:
+                        user32.keybd_event(0x11, 0, 0, 0)   # Ctrl down
+                        user32.keybd_event(0x11, 0, 2, 0)   # Ctrl up
+                    except Exception:
+                        pass
                 try:
                     if _on_alttab:
                         _on_alttab(-1 if shift else 1)
                 except Exception:
                     pass
-                return 1            # swallow -> Windows Alt+Tab never fires
+                return 1            # swallow -> Windows' own switcher never fires
     return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
 

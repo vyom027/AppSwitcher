@@ -158,6 +158,31 @@ class Backend(QtCore.QObject):
             pass
         self.changed.emit()
 
+    # hotkey ----------------------------------------------------------------
+    @QtCore.Property('QStringList', constant=True)
+    def hotkeyMods(self):
+        return ["alt", "ctrl"]
+
+    @QtCore.Property('QStringList', constant=True)
+    def hotkeyKeys(self):
+        return list(S.HOTKEY_KEYS.keys())
+
+    @QtCore.Property(str, notify=changed)
+    def hotkeyMod(self):
+        return str(S.SETTINGS.get("hotkey_mod", "alt"))
+    @hotkeyMod.setter
+    def hotkeyMod(self, v):
+        S.SETTINGS["hotkey_mod"] = str(v)
+        S.apply_hotkey(); self.changed.emit()
+
+    @QtCore.Property(str, notify=changed)
+    def hotkeyKey(self):
+        return S._VK_TO_KEY.get(int(S.SETTINGS.get("hotkey_key", 0x09)), "Tab")
+    @hotkeyKey.setter
+    def hotkeyKey(self, v):
+        S.SETTINGS["hotkey_key"] = int(S.HOTKEY_KEYS.get(str(v), 0x09))
+        S.apply_hotkey(); self.changed.emit()
+
     @QtCore.Property(bool, notify=warnChanged)
     def threeFingerWarning(self):
         return self._warn and not S.SETTINGS.get("warn_dismissed", False)

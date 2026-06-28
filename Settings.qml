@@ -189,6 +189,17 @@ Window {
                         Combo { Layout.fillWidth: true; model: backend.layoutsList
                             Component.onCompleted: currentIndex = model.indexOf(backend.layout)
                             onActivated: backend.layout = model[currentIndex] }
+                        Label2 { text: "Switch shortcut" }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 10
+                            Combo { Layout.fillWidth: true; model: backend.hotkeyMods
+                                Component.onCompleted: currentIndex = model.indexOf(backend.hotkeyMod)
+                                onActivated: backend.hotkeyMod = model[currentIndex] }
+                            Label2 { text: "+"; Layout.alignment: Qt.AlignVCenter }
+                            Combo { Layout.fillWidth: true; model: backend.hotkeyKeys
+                                Component.onCompleted: currentIndex = model.indexOf(backend.hotkeyKey)
+                                onActivated: backend.hotkeyKey = model[currentIndex] }
+                        }
                         Item { Layout.fillHeight: true }
                         RowLayout { Layout.fillWidth: true; spacing: 10
                             Pill { label: "Preview layout"; Layout.fillWidth: true; onClicked: backend.previewLayout() }
@@ -282,7 +293,7 @@ Window {
             // bottom bar
             RowLayout {
                 Layout.fillWidth: true; spacing: 14
-                Label2 { text: "Replace Alt+Tab"; color: win.text1; font.pixelSize: 14 }
+                Label2 { text: "Replace system switcher"; color: win.text1; font.pixelSize: 14 }
                 IOSSwitch { checked: backend.altTab; onToggled: backend.altTab = v }
                 Rectangle { width: 1; height: 22; color: Qt.rgba(1,1,1,0.12) }
                 Label2 { text: "Start with Windows"; color: win.text1; font.pixelSize: 14 }
