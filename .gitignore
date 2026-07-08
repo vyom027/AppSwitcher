@@ -7,3 +7,6 @@ Output/
 *.zip
 _*.png
 *.original.md
+
+.claude
+brag-output
