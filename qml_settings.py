@@ -23,6 +23,43 @@ def _three_finger_enabled():
         return True
 
 
+# Qt.Key -> Windows vkCode for keys whose codes differ. Letters (Qt.Key_A..Z =
+# 0x41..0x5A) and digits (0x30..0x39) already equal their vkCodes, so only the
+# odd ones (Tab, arrows, punctuation, F-keys…) need an entry.
+_QT_TO_VK = {
+    0x01000001: 0x09,  # Tab
+    0x01000000: 0x1B,  # Escape
+    0x01000004: 0x0D,  # Return
+    0x01000005: 0x0D,  # Enter (keypad)
+    0x01000003: 0x08,  # Backspace
+    0x01000007: 0x2E,  # Delete
+    0x01000006: 0x2D,  # Insert
+    0x01000010: 0x24,  # Home
+    0x01000011: 0x23,  # End
+    0x01000016: 0x21,  # PageUp
+    0x01000017: 0x22,  # PageDown
+    0x01000012: 0x25,  # Left
+    0x01000013: 0x26,  # Up
+    0x01000014: 0x27,  # Right
+    0x01000015: 0x28,  # Down
+    0x20:       0x20,  # Space
+    0x2D: 0xBD, 0x3D: 0xBB,               # - =
+    0x5B: 0xDB, 0x5D: 0xDD, 0x5C: 0xDC,   # [ ] \
+    0x3B: 0xBA, 0x27: 0xDE,               # ; '
+    0x2C: 0xBC, 0x2E: 0xBE, 0x2F: 0xBF,   # , . /
+    0x60: 0xC0,                           # ` (backtick)
+}
+for _i in range(12):                       # F1..F12
+    _QT_TO_VK[0x01000030 + _i] = 0x70 + _i
+
+def _qt_key_to_vk(qt_key):
+    if qt_key in _QT_TO_VK:
+        return _QT_TO_VK[qt_key]
+    if 0x30 <= qt_key <= 0x39 or 0x41 <= qt_key <= 0x5A:   # 0-9, A-Z
+        return qt_key
+    return 0
+
+
 class Backend(QtCore.QObject):
     changed = QtCore.Signal()
     warnChanged = QtCore.Signal()
@@ -182,6 +219,40 @@ class Backend(QtCore.QObject):
     def hotkeyKey(self, v):
         S.SETTINGS["hotkey_key"] = int(S.HOTKEY_KEYS.get(str(v), 0x09))
         S.apply_hotkey(); self.changed.emit()
+
+    # pinch shortcut -------------------------------------------------------
+    @QtCore.Property(bool, notify=changed)
+    def pinchEnabled(self):
+        return bool(S.SETTINGS.get("pinch_enabled", True))
+    @pinchEnabled.setter
+    def pinchEnabled(self, v):
+        S.SETTINGS["pinch_enabled"] = bool(v); S.save_settings(); self.changed.emit()
+
+    @QtCore.Property(str, notify=changed)
+    def pinchShortcut(self):
+        return S.pinch_label()
+
+    @QtCore.Slot(int, int)
+    def captureChord(self, qt_key, qt_mods):
+        """Record a key chord captured in the QML field. qt_key is a Qt.Key,
+        qt_mods a Qt.KeyboardModifiers bitmask — mapped to Windows vkCodes."""
+        vk = _qt_key_to_vk(qt_key)
+        if not vk:
+            return
+        mods = []
+        if qt_mods & 0x04000000: mods.append(0x11)   # Ctrl
+        if qt_mods & 0x08000000: mods.append(0x12)   # Alt
+        if qt_mods & 0x02000000: mods.append(0x10)   # Shift
+        if qt_mods & 0x10000000: mods.append(0x5B)   # Win / Meta
+        S.SETTINGS["pinch_mods"] = mods
+        S.SETTINGS["pinch_vk"]   = vk
+        S.save_settings(); self.changed.emit()
+
+    @QtCore.Slot()
+    def clearChord(self):
+        S.SETTINGS["pinch_mods"] = []
+        S.SETTINGS["pinch_vk"]   = 0
+        S.save_settings(); self.changed.emit()
 
     @QtCore.Property(bool, notify=warnChanged)
     def threeFingerWarning(self):

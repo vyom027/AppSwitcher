@@ -21,6 +21,7 @@ import ctypes
 import ctypes.wintypes as wt
 import threading
 import time
+import math
 import sys
 
 user32   = ctypes.windll.user32
@@ -277,21 +278,31 @@ class GestureTracker:
     """3-finger gesture interpreter.
 
     While 3 fingers are down:
+      • fingers converge toward the centroid (spread shrinks past PINCH_RATIO)
+        -> fire the pinch shortcut, then lock the gesture until fingers lift
       • keep moving horizontally  -> switch app per SWIPE_THRESHOLD of travel
         (swipe again without lifting to keep stepping through apps)
       • hold roughly still for DWELL seconds -> open the picker; after that the
         picker itself reads live finger position to navigate, lift to select
+
+    Pinch vs swipe separate naturally: a swipe moves the centroid horizontally
+    while the spread stays constant; a pinch keeps the centroid still while the
+    spread collapses. Whichever metric crosses its threshold first wins.
     """
     SWIPE_THRESHOLD = 200    # logical units of travel that triggers one switch
     DWELL           = 0.20   # seconds of stillness that opens the picker
     PREWARM         = 0.10   # stillness at which we pre-grab the backdrop
     MOVE_EPS        = 18     # per-sample travel under this counts as "still"
     MIN_FINGERS     = 3
+    PINCH_RATIO     = 0.62   # spread <= base*this -> pinch (38% collapse)
+    PINCH_MIN_BASE  = 120    # ignore tiny base spreads (noise / near-touching)
+    SPREAD_EPS      = 12     # per-sample spread change that counts as "moving"
 
-    def __init__(self, on_swipe, on_hold_swipe, on_arm=None):
+    def __init__(self, on_swipe, on_hold_swipe, on_arm=None, on_pinch=None):
         self.on_swipe      = on_swipe
         self.on_hold_swipe = on_hold_swipe
         self.on_arm        = on_arm     # fired when a hold looks imminent
+        self.on_pinch      = on_pinch   # fired when 3 fingers pinch inward
         self._reset()
 
     def _reset(self):
@@ -303,6 +314,15 @@ class GestureTracker:
         self._still_since = 0.0
         self._picker     = False  # picker already opened this gesture
         self._prewarmed  = False
+        self._base_spread = 0.0   # finger spread when the gesture began
+        self._last_spread = 0.0
+        self._pinched    = False  # pinch already fired this gesture
+
+    @staticmethod
+    def _spread(contacts, avg_x, avg_y):
+        """Mean distance of the fingers from their centroid."""
+        return sum(math.hypot(x - avg_x, y - avg_y)
+                   for x, y in contacts.values()) / len(contacts)
 
     def feed(self, contacts):
         """contacts: dict {contact_id: (x, y)} of fingers currently down."""
@@ -313,13 +333,17 @@ class GestureTracker:
         now   = time.time()
         avg_x = sum(x for x, _ in contacts.values()) / len(contacts)
         avg_y = sum(y for _, y in contacts.values()) / len(contacts)
+        spread = self._spread(contacts, avg_x, avg_y)
 
         if not self._active:                 # fingers just reached 3
             self._active      = True
             self._base_x, self._base_y = avg_x, avg_y
             self._last_x, self._last_y = avg_x, avg_y
+            self._base_spread = spread
+            self._last_spread = spread
             self._still_since = now
             self._picker      = False
+            self._pinched     = False
             # Prewarm immediately: capturing the windows now (in the background)
             # overlaps the finger travel, so a swipe's slide starts instantly.
             self._prewarmed   = True
@@ -327,12 +351,27 @@ class GestureTracker:
                 self.on_arm()
             return
 
-        if self._picker:                     # picker owns the gesture now
+        if self._picker or self._pinched:    # gesture already consumed
             return
 
-        # stillness tracking
-        if abs(avg_x - self._last_x) + abs(avg_y - self._last_y) > self.MOVE_EPS:
+        # pinch: fingers collapsed toward the centroid past the ratio. Checked
+        # before swipe/hold so a symmetric pinch (centroid barely moves) can't be
+        # mistaken for a hold, and locks the rest of the gesture once fired.
+        if (self.on_pinch and self._base_spread >= self.PINCH_MIN_BASE
+                and spread <= self._base_spread * self.PINCH_RATIO):
+            self._pinched = True
+            if DEBUG:
+                print(f"[pinch] base={self._base_spread:.0f} -> {spread:.0f}",
+                      flush=True)
+            self.on_pinch(-1)
+            return
+
+        # stillness tracking — a shrinking spread also counts as motion so a
+        # slow pinch doesn't trip the hold-picker before it completes.
+        if (abs(avg_x - self._last_x) + abs(avg_y - self._last_y) > self.MOVE_EPS
+                or abs(spread - self._last_spread) > self.SPREAD_EPS):
             self._last_x, self._last_y = avg_x, avg_y
+            self._last_spread = spread
             self._still_since = now
             self._prewarmed = False          # moved again -> not a hold (yet)
 
@@ -485,15 +524,16 @@ def run_message_loop():
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
-def start(on_swipe, on_hold_swipe, on_arm=None, on_alttab=None):
+def start(on_swipe, on_hold_swipe, on_arm=None, on_alttab=None, on_pinch=None):
     """
     on_swipe(direction)      — quick 3-finger swipe; direction 1=right, -1=left
     on_hold_swipe(direction) — held 3-finger swipe, same directions
     on_arm()                 — a hold looks imminent (use to pre-warm the picker)
     on_alttab(direction)     — Alt+Tab pressed (keyboard hook); replaces Win switch
+    on_pinch(direction)      — 3 fingers pinched inward (fires the pinch shortcut)
     """
     global _tracker
-    _tracker = GestureTracker(on_swipe, on_hold_swipe, on_arm)
+    _tracker = GestureTracker(on_swipe, on_hold_swipe, on_arm, on_pinch)
     _cb = _create_message_window()   # keep reference alive
     if on_alttab is not None:
         try:
@@ -515,7 +555,10 @@ if __name__ == "__main__":
     def _hold(d):
         print(f"HOLD+SWIPE {'RIGHT' if d == 1 else 'LEFT'}")
 
+    def _pinch(d):
+        print("PINCH IN")
+
     print("Move 3 fingers on the touchpad. Ctrl+C to quit.")
     if DEBUG:
         print("(debug: printing every report frame)")
-    start(_swipe, _hold)
+    start(_swipe, _hold, on_pinch=_pinch)

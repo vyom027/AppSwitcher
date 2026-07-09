@@ -200,6 +200,48 @@ Window {
                                 Component.onCompleted: currentIndex = model.indexOf(backend.hotkeyKey)
                                 onActivated: backend.hotkeyKey = model[currentIndex] }
                         }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 8
+                            Label2 { text: "Pinch shortcut (3-finger)"; Layout.fillWidth: true }
+                            IOSSwitch { checked: backend.pinchEnabled
+                                onToggled: backend.pinchEnabled = v }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 10
+                            FocusScope {
+                                id: capScope
+                                Layout.fillWidth: true; implicitHeight: 42
+                                property bool capturing: false
+                                Rectangle {
+                                    anchors.fill: parent; radius: 13
+                                    color: Qt.rgba(1, 1, 1, 0.05)
+                                    border.width: 1
+                                    border.color: capScope.capturing ? win.accent : Qt.rgba(1, 1, 1, 0.08)
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: capScope.capturing ? "Press keys…" : backend.pinchShortcut
+                                        color: capScope.capturing ? win.accent : win.text1
+                                        font.family: win.uiFont; font.pixelSize: 14
+                                    }
+                                }
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: { capScope.capturing = true; capScope.forceActiveFocus() }
+                                }
+                                Keys.onPressed: (event) => {
+                                    var k = event.key;
+                                    if (k === Qt.Key_Control || k === Qt.Key_Alt
+                                        || k === Qt.Key_Shift || k === Qt.Key_Meta
+                                        || k === Qt.Key_AltGr) { event.accepted = true; return; }
+                                    if (k === Qt.Key_Escape) {
+                                        capScope.capturing = false; event.accepted = true; return; }
+                                    backend.captureChord(k, event.modifiers);
+                                    capScope.capturing = false; event.accepted = true;
+                                }
+                                onActiveFocusChanged: if (!activeFocus) capturing = false
+                            }
+                            Pill { label: "Clear"; onClicked: backend.clearChord() }
+                        }
                         Item { Layout.fillHeight: true }
                         RowLayout { Layout.fillWidth: true; spacing: 10
                             Pill { label: "Preview layout"; Layout.fillWidth: true; onClicked: backend.previewLayout() }

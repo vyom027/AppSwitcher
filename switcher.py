@@ -58,6 +58,9 @@ SETTINGS  = {
     "blocklist":  [],         # window titles to hide from the switcher
     "hotkey_mod": "alt",      # switch chord modifier: "alt" or "ctrl"
     "hotkey_key": 0x09,       # switch chord trigger vkCode (0x09 = Tab)
+    "pinch_enabled": True,    # 3-finger pinch fires a custom shortcut
+    "pinch_mods": [0x11],     # modifier vkCodes held (0x11=Ctrl, 0x12=Alt, 0x10=Shift, 0x5B=Win)
+    "pinch_vk":   0x09,       # main key vkCode sent with the modifiers (Tab)
 }
 
 # Generic vkCode of the chord modifier, polled by the picker to detect "release
@@ -85,6 +88,62 @@ def hotkey_labels():
     mod = "Ctrl" if str(SETTINGS.get("hotkey_mod", "alt")).lower() == "ctrl" else "Alt"
     key = _VK_TO_KEY.get(int(SETTINGS.get("hotkey_key", 0x09)), "Tab")
     return mod, key
+
+# ─── Pinch shortcut (3-finger pinch fires a user-set key chord) ───────────────
+# Names for building the display string. Modifiers keep a stable display order.
+_MOD_VK_ORDER = [0x11, 0x12, 0x10, 0x5B]      # Ctrl, Alt, Shift, Win
+_VK_NAMES = {
+    0x11: "Ctrl", 0x12: "Alt", 0x10: "Shift", 0x5B: "Win",
+    0x09: "Tab", 0x20: "Space", 0x0D: "Enter", 0x1B: "Esc",
+    0x08: "Backspace", 0x2E: "Delete", 0x2D: "Insert", 0xC0: "`",
+    0x25: "Left", 0x26: "Up", 0x27: "Right", 0x28: "Down",
+    0x21: "PageUp", 0x22: "PageDown", 0x24: "Home", 0x23: "End",
+    0xBD: "-", 0xBB: "=", 0xDB: "[", 0xDD: "]", 0xDC: "\\",
+    0xBA: ";", 0xDE: "'", 0xBC: ",", 0xBE: ".", 0xBF: "/",
+}
+for _n in range(1, 13):                        # F1..F12
+    _VK_NAMES[0x70 + _n - 1] = f"F{_n}"
+
+# vkCodes that must be sent as "extended" keys (arrows, nav cluster, RWin…).
+_EXTENDED_VKS = {0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x21, 0x22, 0x24, 0x23,
+                 0x5B, 0x5C}
+
+def _vk_name(vk):
+    if vk in _VK_NAMES:
+        return _VK_NAMES[vk]
+    if 0x30 <= vk <= 0x5A:                     # 0-9, A-Z share ASCII with vk
+        return chr(vk)
+    return f"0x{vk:02X}"
+
+def pinch_label():
+    """Human string for the current pinch chord, e.g. 'Ctrl + Tab' or 'Not set'."""
+    vk = int(SETTINGS.get("pinch_vk", 0) or 0)
+    if not vk:
+        return "Not set"
+    mods = [m for m in _MOD_VK_ORDER if m in SETTINGS.get("pinch_mods", [])]
+    return " + ".join(_vk_name(m) for m in mods) + (" + " if mods else "") + _vk_name(vk)
+
+def send_shortcut(mods, vk):
+    """Synthesize a modifier+key chord into the foreground window via keybd_event.
+    mods: list of modifier vkCodes to hold; vk: the main key. Presses mods down,
+    taps vk, releases mods in reverse order."""
+    KEYUP  = 0x02
+    EXT    = 0x01
+    u32 = ctypes.windll.user32
+    def _flag(k, up):
+        f = KEYUP if up else 0
+        if k in _EXTENDED_VKS:
+            f |= EXT
+        return f
+    try:
+        for m in mods:
+            u32.keybd_event(m, 0, _flag(m, False), 0)
+        u32.keybd_event(vk, 0, _flag(vk, False), 0)
+        u32.keybd_event(vk, 0, _flag(vk, True), 0)
+        for m in reversed(mods):
+            u32.keybd_event(m, 0, _flag(m, True), 0)
+    except Exception as e:
+        print("[pinch] send failed:", e)
 
 def load_settings():
     try:
@@ -1291,6 +1350,19 @@ def handle_arm():
 def handle_alttab(direction):
     # fired from the keyboard hook (background thread) on Alt+Tab
     _post_timed("alttab", lambda: _switcher.alttab(direction))
+
+def handle_pinch(direction):
+    # fired from the gesture thread on a 3-finger inward pinch. keybd_event
+    # targets the foreground window and needs no Qt, so send inline (no marshal).
+    if not SETTINGS.get("pinch_enabled", True):
+        return
+    vk = int(SETTINGS.get("pinch_vk", 0) or 0)
+    if not vk:
+        return
+    mods = [int(m) for m in SETTINGS.get("pinch_mods", [])]
+    if DEBUG:
+        print(f"[pinch] send mods={mods} vk={vk}", flush=True)
+    send_shortcut(mods, vk)
 
 if __name__ == "__main__":
     print("AppSwitcher loaded. Run main.py to start.")

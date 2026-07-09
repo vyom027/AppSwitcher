@@ -164,6 +164,7 @@ def main():
             on_hold_swipe = switcher.handle_hold_swipe,
             on_arm        = switcher.handle_arm,
             on_alttab     = switcher.handle_alttab,
+            on_pinch      = switcher.handle_pinch,
         )
     threading.Thread(target=listen, daemon=True).start()
     # Listen for a later launch asking us to show Settings (focus-existing).
