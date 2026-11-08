@@ -10,3 +10,5 @@ _*.png
 
 .claude
 brag-output
+rust/target/
+setup_rust.ps1
