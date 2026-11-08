@@ -11,3 +11,4 @@ if not exist "target\release\appswitcher.exe" (
 echo Starting AppSwitcher Native Rust v2.0...
 target\release\appswitcher.exe
 pause
+

@@ -8,7 +8,6 @@ use crate::layouts::hero::HeroLayout;
 use crate::layouts::row::RowLayout;
 use crate::layouts::wallet::WalletLayout;
 use crate::layouts::PickerLayout;
-use crate::render::backdrop::get_frosted_backdrop;
 use crate::render::d2d::D2DContext;
 use crate::render::spring::{Spring, SpringConfig};
 use crate::window::capture::{capture_window_image, screen_size, ImageBuffer};
@@ -20,16 +19,21 @@ use std::thread;
 use std::time::{Duration, Instant};
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
+use windows::Win32::Graphics::Dwm::{
+    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_TRANSIENTWINDOW,
+    DWMWA_SYSTEMBACKDROP_TYPE,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, PeekMessageW, RegisterClassExW,
     SetWindowPos, ShowWindow, TranslateMessage, HWND_TOPMOST, MSG, PM_REMOVE, SWP_NOMOVE,
-    SWP_NOSIZE, SW_HIDE, SW_SHOW, WM_QUIT, WNDCLASSEXW, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    SWP_NOSIZE, SW_HIDE, SW_SHOW, WM_QUIT, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +96,24 @@ impl OverlayWindow {
                 h_instance,
                 None,
             )?;
+
+            // 1. Extend DWM frame into client area for native translucent background
+            let margins = MARGINS {
+                cxLeftWidth: -1,
+                cxRightWidth: -1,
+                cyTopHeight: -1,
+                cyBottomHeight: -1,
+            };
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+
+            // 2. Enable Windows 11 Native Acrylic Frosted Glass
+            let backdrop_type = DWMSBT_TRANSIENTWINDOW.0 as u32;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                &backdrop_type as *const _ as *const _,
+                size_of::<u32>() as u32,
+            );
 
             let d2d = D2DContext::new(hwnd, width, height)?;
 
@@ -176,7 +198,8 @@ impl OverlayWindow {
             let eased_t = 1.0 - (1.0 - t).powi(4);
 
             self.d2d.begin_draw();
-            self.d2d.clear(0.02, 0.03, 0.04, 1.0);
+            // Clear with translucent frosted glass tint
+            self.d2d.clear(0.04, 0.05, 0.08, 0.45);
 
             anim_kind.render(
                 &self.d2d,
@@ -233,18 +256,18 @@ impl OverlayWindow {
             _ => Box::new(DockLayout::default()),
         };
 
-        // Capture window thumbnails in parallel
-        let thumbnails: Vec<Option<ImageBuffer>> = windows
+        // Pre-create GPU bitmaps ONCE before the 120Hz loop
+        // (Eliminates all per-frame GPU allocations, ensuring rock-solid 144Hz)
+        let bitmaps: Vec<Option<ID2D1Bitmap>> = windows
             .iter()
-            .map(|w| capture_window_image(w.hwnd))
+            .map(|w| {
+                capture_window_image(w.hwnd).and_then(|img| {
+                    self.d2d
+                        .create_bitmap_from_rgba(img.width, img.height, &img.pixels)
+                        .ok()
+                })
+            })
             .collect();
-
-        // Prepare frosted glass backdrop
-        let backdrop = get_frosted_backdrop(self.width, self.height);
-        let backdrop_bmp = self
-            .d2d
-            .create_bitmap_from_rgba(backdrop.width, backdrop.height, &backdrop.pixels)
-            .ok();
 
         let initial = initial_idx.min(n - 1);
         let mut spring = Spring::new(initial as f64, SpringConfig::SNAPPY);
@@ -370,24 +393,12 @@ impl OverlayWindow {
 
             // 4. Render 120Hz frame
             self.d2d.begin_draw();
-            self.d2d.clear(0.05, 0.06, 0.08, 1.0);
-
-            // Frosted backdrop
-            if let Some(ref bg) = backdrop_bmp {
-                self.d2d.draw_bitmap(
-                    bg,
-                    D2D_RECT_F {
-                        left: 0.0,
-                        top: 0.0,
-                        right: sw,
-                        bottom: sh,
-                    },
-                    1.0,
-                );
-            }
+            // Clear with translucent frosted glass tint
+            // (Windows 11 hardware-accelerated Acrylic blur shows through)
+            self.d2d.clear(0.04, 0.05, 0.08, 0.45);
 
             // Active layout
-            layout.render(&self.d2d, windows, &thumbnails, accent, sw, sh);
+            layout.render(&self.d2d, windows, &bitmaps, accent, sw, sh);
 
             let _ = self.d2d.end_draw();
 

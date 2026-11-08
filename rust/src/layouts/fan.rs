@@ -1,8 +1,8 @@
 use crate::layouts::PickerLayout;
 use crate::render::d2d::D2DContext;
-use crate::window::capture::ImageBuffer;
 use crate::window::enumerator::WindowInfo;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 
 pub struct FanLayout {
     pub card_w: f32,
@@ -34,7 +34,7 @@ impl PickerLayout for FanLayout {
         &self,
         d2d: &D2DContext,
         windows: &[WindowInfo],
-        thumbnails: &[Option<ImageBuffer>],
+        bitmaps: &[Option<ID2D1Bitmap>],
         accent: D2D1_COLOR_F,
         sw: f32,
         sh: f32,
@@ -60,29 +60,22 @@ impl PickerLayout for FanLayout {
             let ang_rad = (offset * self.angle_step).to_radians();
 
             let cx = sw * 0.5 + arc_r * ang_rad.sin();
-            let card_cy = pivot_y - arc_r * ang_rad.cos();
-
-            let abs_off = offset.abs();
-            let scale = if abs_off < 0.5 {
-                1.15
-            } else {
-                (1.0 - 0.08 * abs_off).max(0.65)
-            };
-
-            let cw = self.card_w * scale;
-            let ch = self.card_h * scale;
-
-            let rect = D2D_RECT_F {
-                left: cx - cw * 0.5,
-                top: card_cy - ch * 0.5,
-                right: cx + cw * 0.5,
-                bottom: card_cy + ch * 0.5,
-            };
+            let dy = pivot_y - arc_r * ang_rad.cos();
 
             let is_sel = i == self.selected;
+            let scale = if is_sel { 1.25 } else { 1.0 };
+            let w = self.card_w * scale;
+            let h = self.card_h * scale;
+
+            let rect = D2D_RECT_F {
+                left: cx - w * 0.5,
+                top: dy - h * 0.5,
+                right: cx + w * 0.5,
+                bottom: dy + h * 0.5,
+            };
 
             if is_sel {
-                d2d.draw_glow(rect, 16.0, accent, 4);
+                d2d.draw_glow(rect, 14.0, accent, 4);
             }
 
             d2d.fill_rounded_rect(
@@ -92,70 +85,76 @@ impl PickerLayout for FanLayout {
                     r: 0.1,
                     g: 0.12,
                     b: 0.16,
-                    a: if is_sel { 1.0 } else { (1.0 - abs_off * 0.15).max(0.4) },
+                    a: if is_sel { 1.0 } else { 0.78 },
                 },
             );
 
-            if i < thumbnails.len() {
-                if let Some(ref thumb) = thumbnails[i] {
-                    if let Ok(bmp) = d2d.create_bitmap_from_rgba(thumb.width, thumb.height, &thumb.pixels) {
-                        d2d.draw_bitmap(&bmp, rect, if is_sel { 1.0 } else { 0.75 });
-                    }
+            if i < bitmaps.len() {
+                if let Some(ref bmp) = bitmaps[i] {
+                    d2d.draw_bitmap(bmp, rect, if is_sel { 1.0 } else { 0.8 });
                 }
             }
 
             if is_sel {
                 d2d.draw_rounded_rect(rect, 14.0, accent, 2.5);
+            } else {
+                d2d.draw_rounded_rect(
+                    rect,
+                    14.0,
+                    D2D1_COLOR_F {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 0.10,
+                    },
+                    1.0,
+                );
             }
         }
 
-        if self.selected < windows.len() {
-            let title = &windows[self.selected].title;
-            let title_rect = D2D_RECT_F {
-                left: 100.0,
-                top: cy + self.card_h * 0.5 + 24.0,
-                right: sw - 100.0,
-                bottom: cy + self.card_h * 0.5 + 54.0,
-            };
-            d2d.draw_text(
-                title,
-                title_rect,
-                D2D1_COLOR_F {
-                    r: 0.95,
-                    g: 0.96,
-                    b: 0.98,
-                    a: 1.0,
-                },
-                16.0,
-                true,
-                true,
-            );
-        }
+        // Title
+        let title_rect = D2D_RECT_F {
+            left: 40.0,
+            top: cy - 140.0,
+            right: sw - 40.0,
+            bottom: cy - 100.0,
+        };
+        let title = if self.selected < windows.len() {
+            &windows[self.selected].title
+        } else {
+            ""
+        };
+        d2d.draw_text(
+            title,
+            title_rect,
+            D2D1_COLOR_F {
+                r: 0.95,
+                g: 0.96,
+                b: 1.0,
+                a: 1.0,
+            },
+            18.0,
+            true,
+            true,
+        );
     }
 
     fn hit_test(&self, px: f32, py: f32, count: usize, sw: f32, sh: f32) -> Option<usize> {
-        let n = count;
-        if n == 0 {
-            return None;
-        }
-
         let cy = sh * 0.5 - 30.0;
         let arc_r = sw * 0.9;
         let pivot_y = cy + arc_r;
 
-        for i in 0..n {
+        for i in 0..count {
             let offset = i as f32 - self.focus;
             let ang_rad = (offset * self.angle_step).to_radians();
 
             let cx = sw * 0.5 + arc_r * ang_rad.sin();
-            let card_cy = pivot_y - arc_r * ang_rad.cos();
+            let dy = pivot_y - arc_r * ang_rad.cos();
 
-            if (px - cx).abs() <= self.card_w * 0.5 && (py - card_cy).abs() <= self.card_h * 0.5 {
+            if px >= cx - self.card_w * 0.5 && px <= cx + self.card_w * 0.5 && py >= dy - self.card_h * 0.5 && py <= dy + self.card_h * 0.5 {
                 return Some(i);
             }
         }
-
         None
     }
 }
-

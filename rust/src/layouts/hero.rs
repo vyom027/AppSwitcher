@@ -1,8 +1,8 @@
 use crate::layouts::PickerLayout;
 use crate::render::d2d::D2DContext;
-use crate::window::capture::ImageBuffer;
 use crate::window::enumerator::WindowInfo;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 
 pub struct HeroLayout {
     pub film_w: f32,
@@ -34,7 +34,7 @@ impl PickerLayout for HeroLayout {
         &self,
         d2d: &D2DContext,
         windows: &[WindowInfo],
-        thumbnails: &[Option<ImageBuffer>],
+        bitmaps: &[Option<ID2D1Bitmap>],
         accent: D2D1_COLOR_F,
         sw: f32,
         sh: f32,
@@ -64,109 +64,120 @@ impl PickerLayout for HeroLayout {
             prev_rect,
             18.0,
             D2D1_COLOR_F {
-                r: 0.1,
-                g: 0.12,
-                b: 0.16,
+                r: 0.09,
+                g: 0.11,
+                b: 0.15,
                 a: 0.95,
             },
         );
 
-        if self.selected < thumbnails.len() {
-            if let Some(ref thumb) = thumbnails[self.selected] {
-                if let Ok(bmp) = d2d.create_bitmap_from_rgba(thumb.width, thumb.height, &thumb.pixels) {
-                    d2d.draw_bitmap(&bmp, prev_rect, 1.0);
-                }
+        if self.selected < bitmaps.len() {
+            if let Some(ref bmp) = bitmaps[self.selected] {
+                d2d.draw_bitmap(bmp, prev_rect, 1.0);
             }
         }
 
-        d2d.draw_rounded_rect(prev_rect, 18.0, accent, 2.5);
+        d2d.draw_rounded_rect(prev_rect, 18.0, accent, 2.0);
 
-        // Window Title
-        if self.selected < windows.len() {
-            let title = &windows[self.selected].title;
-            let title_rect = D2D_RECT_F {
-                left: 100.0,
-                top: prev_top + preview_h + 8.0,
-                right: sw - 100.0,
-                bottom: prev_top + preview_h + 34.0,
-            };
-            d2d.draw_text(
-                title,
-                title_rect,
-                D2D1_COLOR_F {
-                    r: 0.95,
-                    g: 0.96,
-                    b: 0.98,
-                    a: 1.0,
-                },
-                16.0,
-                true,
-                true,
-            );
-        }
+        // Title
+        let title_rect = D2D_RECT_F {
+            left: 40.0,
+            top: prev_top + preview_h + 12.0,
+            right: sw - 40.0,
+            bottom: prev_top + preview_h + 46.0,
+        };
+        let title = if self.selected < windows.len() {
+            &windows[self.selected].title
+        } else {
+            ""
+        };
+        d2d.draw_text(
+            title,
+            title_rect,
+            D2D1_COLOR_F {
+                r: 0.95,
+                g: 0.96,
+                b: 1.0,
+                a: 1.0,
+            },
+            18.0,
+            true,
+            true,
+        );
 
-        // 2. Filmstrip of cards below
-        let total_w = n as f32 * self.film_w + (n as f32 - 1.0) * self.gap;
-        let mut x = (sw - total_w) * 0.5;
+        // 2. Bottom Filmstrip
+        let film_stride = self.film_w + self.gap;
+        let ox = sw * 0.5 - (self.focus * film_stride) - (self.film_w * 0.5);
 
         for i in 0..n {
-            let is_sel = i == self.selected;
-            let rect = D2D_RECT_F {
+            let x = ox + i as f32 * film_stride;
+            let y = film_y;
+
+            if x + self.film_w < 0.0 || x > sw {
+                continue;
+            }
+
+            let card_rect = D2D_RECT_F {
                 left: x,
-                top: film_y,
+                top: y,
                 right: x + self.film_w,
-                bottom: film_y + self.film_h,
+                bottom: y + self.film_h,
             };
 
+            let is_sel = i == self.selected;
+
+            if is_sel {
+                d2d.draw_glow(card_rect, 12.0, accent, 3);
+            }
+
             d2d.fill_rounded_rect(
-                rect,
-                10.0,
+                card_rect,
+                12.0,
                 D2D1_COLOR_F {
-                    r: 0.12,
-                    g: 0.14,
-                    b: 0.18,
-                    a: if is_sel { 1.0 } else { 0.7 },
+                    r: 0.1,
+                    g: 0.12,
+                    b: 0.16,
+                    a: if is_sel { 1.0 } else { 0.75 },
                 },
             );
 
-            if i < thumbnails.len() {
-                if let Some(ref thumb) = thumbnails[i] {
-                    if let Ok(bmp) = d2d.create_bitmap_from_rgba(thumb.width, thumb.height, &thumb.pixels) {
-                        d2d.draw_bitmap(&bmp, rect, if is_sel { 1.0 } else { 0.75 });
-                    }
+            if i < bitmaps.len() {
+                if let Some(ref bmp) = bitmaps[i] {
+                    d2d.draw_bitmap(bmp, card_rect, if is_sel { 1.0 } else { 0.75 });
                 }
             }
 
             if is_sel {
-                d2d.draw_rounded_rect(rect, 10.0, accent, 2.5);
+                d2d.draw_rounded_rect(card_rect, 12.0, accent, 2.5);
+            } else {
+                d2d.draw_rounded_rect(
+                    card_rect,
+                    12.0,
+                    D2D1_COLOR_F {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 0.10,
+                    },
+                    1.0,
+                );
             }
-
-            x += self.film_w + self.gap;
         }
     }
 
     fn hit_test(&self, px: f32, py: f32, count: usize, sw: f32, sh: f32) -> Option<usize> {
-        let n = count;
-        if n == 0 {
-            return None;
-        }
-
         let film_y = sh - 36.0 - self.film_h;
-        if py < film_y || py > film_y + self.film_h {
-            return None;
-        }
+        let film_stride = self.film_w + self.gap;
+        let ox = sw * 0.5 - (self.focus * film_stride) - (self.film_w * 0.5);
 
-        let total_w = n as f32 * self.film_w + (n as f32 - 1.0) * self.gap;
-        let mut x = (sw - total_w) * 0.5;
+        for i in 0..count {
+            let x = ox + i as f32 * film_stride;
+            let y = film_y;
 
-        for i in 0..n {
-            if px >= x && px <= x + self.film_w {
+            if px >= x && px <= x + self.film_w && py >= y && py <= y + self.film_h {
                 return Some(i);
             }
-            x += self.film_w + self.gap;
         }
-
         None
     }
 }
-

@@ -19,3 +19,4 @@ pub enum AppEvent {
     /// Exit the application cleanly
     Quit,
 }
+

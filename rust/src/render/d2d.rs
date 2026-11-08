@@ -15,13 +15,14 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM;
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM};
 
 pub struct D2DContext {
     pub factory: ID2D1Factory,
     pub dwrite: IDWriteFactory,
     pub target: ID2D1HwndRenderTarget,
     pub rt: ID2D1RenderTarget,
+    pub brush: ID2D1SolidColorBrush,
 }
 
 unsafe impl Send for D2DContext {}
@@ -33,7 +34,13 @@ impl D2DContext {
             let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
 
-            let rt_props = D2D1_RENDER_TARGET_PROPERTIES::default();
+            let rt_props = D2D1_RENDER_TARGET_PROPERTIES {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                ..Default::default()
+            };
             let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
                 hwnd,
                 pixelSize: D2D_SIZE_U { width, height },
@@ -44,11 +51,14 @@ impl D2DContext {
             target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             let rt: ID2D1RenderTarget = target.cast()?;
 
+            let brush = rt.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None)?;
+
             Ok(Self {
                 factory,
                 dwrite,
                 target,
                 rt,
+                brush,
             })
         }
     }
@@ -75,10 +85,6 @@ impl D2DContext {
         }
     }
 
-    pub fn solid_brush(&self, color: D2D1_COLOR_F) -> Result<ID2D1SolidColorBrush, windows::core::Error> {
-        unsafe { self.rt.CreateSolidColorBrush(&color, None) }
-    }
-
     pub fn draw_rounded_rect(
         &self,
         rect: D2D_RECT_F,
@@ -87,28 +93,26 @@ impl D2DContext {
         stroke_width: f32,
     ) {
         unsafe {
-            if let Ok(brush) = self.solid_brush(color) {
-                let rounded = D2D1_ROUNDED_RECT {
-                    rect,
-                    radiusX: radius,
-                    radiusY: radius,
-                };
-                self.rt
-                    .DrawRoundedRectangle(&rounded, &brush, stroke_width, None);
-            }
+            self.brush.SetColor(&color);
+            let rounded = D2D1_ROUNDED_RECT {
+                rect,
+                radiusX: radius,
+                radiusY: radius,
+            };
+            self.rt
+                .DrawRoundedRectangle(&rounded, &self.brush, stroke_width, None);
         }
     }
 
     pub fn fill_rounded_rect(&self, rect: D2D_RECT_F, radius: f32, color: D2D1_COLOR_F) {
         unsafe {
-            if let Ok(brush) = self.solid_brush(color) {
-                let rounded = D2D1_ROUNDED_RECT {
-                    rect,
-                    radiusX: radius,
-                    radiusY: radius,
-                };
-                self.rt.FillRoundedRectangle(&rounded, &brush);
-            }
+            self.brush.SetColor(&color);
+            let rounded = D2D1_ROUNDED_RECT {
+                rect,
+                radiusX: radius,
+                radiusY: radius,
+            };
+            self.rt.FillRoundedRectangle(&rounded, &self.brush);
         }
     }
 
@@ -119,43 +123,41 @@ impl D2DContext {
         color: D2D1_COLOR_F,
         font_size: f32,
         bold: bool,
-        centered: bool,
+        center: bool,
     ) {
         unsafe {
-            let weight = if bold {
+            let font_weight = if bold {
                 DWRITE_FONT_WEIGHT_BOLD
             } else {
                 DWRITE_FONT_WEIGHT_NORMAL
             };
 
-            let font_name = w!("Segoe UI");
             if let Ok(format) = self.dwrite.CreateTextFormat(
-                font_name,
+                w!("Segoe UI Variable Display"),
                 None,
-                weight,
+                font_weight,
                 windows::Win32::Graphics::DirectWrite::DWRITE_FONT_STYLE_NORMAL,
                 windows::Win32::Graphics::DirectWrite::DWRITE_FONT_STRETCH_NORMAL,
                 font_size,
                 w!("en-us"),
             ) {
-                if centered {
+                if center {
                     let _ = format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
                     let _ = format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 } else {
                     let _ = format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
                 }
 
-                if let Ok(brush) = self.solid_brush(color) {
-                    let wide: Vec<u16> = text.encode_utf16().collect();
-                    self.rt.DrawText(
-                        &wide,
-                        &format,
-                        &rect,
-                        &brush,
-                        windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                }
+                let wide: Vec<u16> = text.encode_utf16().collect();
+                self.brush.SetColor(&color);
+                self.rt.DrawText(
+                    &wide,
+                    &format,
+                    &rect,
+                    &self.brush,
+                    windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                );
             }
         }
     }
@@ -194,23 +196,27 @@ impl D2DContext {
         }
     }
 
+    /// Luxury raycast-caliber ambient radial glow behind cards
     pub fn draw_glow(&self, rect: D2D_RECT_F, radius: f32, color: D2D1_COLOR_F, blur_passes: usize) {
         for i in 1..=blur_passes {
-            let expansion = i as f32 * 2.5;
-            let alpha = color.a * (0.35 / (i as f32).powf(1.1));
+            let expansion = i as f32 * 4.0;
+            let alpha = color.a * (0.28 / (i as f32).powf(1.15));
             let expanded_rect = D2D_RECT_F {
                 left: rect.left - expansion,
                 top: rect.top - expansion,
                 right: rect.right + expansion,
                 bottom: rect.bottom + expansion,
             };
-            let c = D2D1_COLOR_F {
-                r: color.r,
-                g: color.g,
-                b: color.b,
-                a: alpha,
-            };
-            self.fill_rounded_rect(expanded_rect, radius + expansion * 0.5, c);
+            self.fill_rounded_rect(
+                expanded_rect,
+                radius + expansion * 0.4,
+                D2D1_COLOR_F {
+                    r: color.r,
+                    g: color.g,
+                    b: color.b,
+                    a: alpha,
+                },
+            );
         }
     }
 }

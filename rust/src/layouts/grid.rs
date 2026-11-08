@@ -1,8 +1,8 @@
 use crate::layouts::PickerLayout;
 use crate::render::d2d::D2DContext;
-use crate::window::capture::ImageBuffer;
 use crate::window::enumerator::WindowInfo;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 
 pub struct GridLayout {
     focus: f32,
@@ -28,7 +28,7 @@ impl PickerLayout for GridLayout {
         &self,
         d2d: &D2DContext,
         windows: &[WindowInfo],
-        thumbnails: &[Option<ImageBuffer>],
+        bitmaps: &[Option<ID2D1Bitmap>],
         accent: D2D1_COLOR_F,
         sw: f32,
         sh: f32,
@@ -60,70 +60,76 @@ impl PickerLayout for GridLayout {
             let y = oy + r * (th + gap);
 
             let is_sel = i == self.selected;
-            let scale = if is_sel { 1.05 } else { 1.0 };
-            let cw = tw * scale;
-            let ch = th * scale;
-            let cx = x - (cw - tw) * 0.5;
-            let cy = y - (ch - th) * 0.5;
+            let d = (i as f32 - self.focus).abs();
+            let scale = 1.0 + 0.08 / (1.0 + d * d * 3.0);
+
+            let w = tw * scale;
+            let h = th * scale;
+            let cx = x + (tw - w) * 0.5;
+            let cy = y + (th - h) * 0.5;
 
             let rect = D2D_RECT_F {
                 left: cx,
                 top: cy,
-                right: cx + cw,
-                bottom: cy + ch,
+                right: cx + w,
+                bottom: cy + h,
             };
 
             if is_sel {
-                d2d.draw_glow(rect, 14.0, accent, 3);
+                d2d.draw_glow(rect, 16.0, accent, 4);
             }
 
+            // Card background
             d2d.fill_rounded_rect(
                 rect,
-                14.0,
+                16.0,
                 D2D1_COLOR_F {
-                    r: 0.12,
-                    g: 0.14,
-                    b: 0.18,
+                    r: 0.1,
+                    g: 0.12,
+                    b: 0.16,
                     a: if is_sel { 1.0 } else { 0.82 },
                 },
             );
 
-            if i < thumbnails.len() {
-                if let Some(ref thumb) = thumbnails[i] {
-                    if let Ok(bmp) = d2d.create_bitmap_from_rgba(thumb.width, thumb.height, &thumb.pixels) {
-                        d2d.draw_bitmap(&bmp, rect, if is_sel { 1.0 } else { 0.85 });
-                    }
+            // Thumbnail
+            if i < bitmaps.len() {
+                if let Some(ref bmp) = bitmaps[i] {
+                    d2d.draw_bitmap(bmp, rect, if is_sel { 1.0 } else { 0.85 });
                 }
             }
 
+            // Card outline
             if is_sel {
-                d2d.draw_rounded_rect(rect, 14.0, accent, 2.5);
-            }
-
-            // Window Title below each tile
-            let text_rect = D2D_RECT_F {
-                left: cx - 10.0,
-                top: cy + ch + 6.0,
-                right: cx + cw + 10.0,
-                bottom: cy + ch + 28.0,
-            };
-            d2d.draw_text(
-                &windows[i].title,
-                text_rect,
-                if is_sel {
+                d2d.draw_rounded_rect(rect, 16.0, accent, 2.5);
+            } else {
+                d2d.draw_rounded_rect(
+                    rect,
+                    16.0,
                     D2D1_COLOR_F {
                         r: 1.0,
                         g: 1.0,
                         b: 1.0,
-                        a: 1.0,
-                    }
-                } else {
-                    D2D1_COLOR_F {
-                        r: 0.7,
-                        g: 0.75,
-                        b: 0.82,
-                        a: 0.85,
-                    }
+                        a: 0.10,
+                    },
+                    1.0,
+                );
+            }
+
+            // Title label
+            let text_rect = D2D_RECT_F {
+                left: cx + 12.0,
+                top: cy + h - 34.0,
+                right: cx + w - 12.0,
+                bottom: cy + h - 8.0,
+            };
+            d2d.draw_text(
+                &windows[i].title,
+                text_rect,
+                D2D1_COLOR_F {
+                    r: 0.95,
+                    g: 0.96,
+                    b: 1.0,
+                    a: if is_sel { 1.0 } else { 0.75 },
                 },
                 13.0,
                 is_sel,
@@ -133,13 +139,8 @@ impl PickerLayout for GridLayout {
     }
 
     fn hit_test(&self, px: f32, py: f32, count: usize, sw: f32, sh: f32) -> Option<usize> {
-        let n = count;
-        if n == 0 {
-            return None;
-        }
-
-        let cols = (n.min(4) as f32).max(1.0);
-        let rows = ((n as f32) / cols).ceil();
+        let cols = (count.min(4) as f32).max(1.0);
+        let rows = ((count as f32) / cols).ceil();
         let margin = 120.0;
         let gap = 24.0;
 
@@ -152,7 +153,7 @@ impl PickerLayout for GridLayout {
         let ox = (sw - total_w) * 0.5;
         let oy = (sh - total_h) * 0.5 - 20.0;
 
-        for i in 0..n {
+        for i in 0..count {
             let r = (i as f32 / cols).floor();
             let c = (i as f32) % cols;
 
@@ -163,8 +164,6 @@ impl PickerLayout for GridLayout {
                 return Some(i);
             }
         }
-
         None
     }
 }
-

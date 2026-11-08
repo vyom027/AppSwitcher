@@ -1,8 +1,8 @@
 use crate::layouts::PickerLayout;
 use crate::render::d2d::D2DContext;
-use crate::window::capture::ImageBuffer;
 use crate::window::enumerator::WindowInfo;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 
 pub struct WalletLayout {
     pub card_w: f32,
@@ -32,7 +32,7 @@ impl PickerLayout for WalletLayout {
         &self,
         d2d: &D2DContext,
         windows: &[WindowInfo],
-        thumbnails: &[Option<ImageBuffer>],
+        bitmaps: &[Option<ID2D1Bitmap>],
         accent: D2D1_COLOR_F,
         sw: f32,
         sh: f32,
@@ -59,16 +59,20 @@ impl PickerLayout for WalletLayout {
                 (0.94 - (abs_off - 1.0) * 0.06).max(0.8)
             };
 
-            let cw = self.card_w * scale;
-            let ch = self.card_h * scale;
-            let y = cy + offset * self.card_h * 0.38 - ch * 0.5;
-            let x = cx - cw * 0.5;
+            let y_shift = if offset < 0.0 {
+                offset * 48.0
+            } else {
+                offset * 54.0
+            };
+
+            let w = self.card_w * scale;
+            let h = self.card_h * scale;
 
             let rect = D2D_RECT_F {
-                left: x,
-                top: y,
-                right: x + cw,
-                bottom: y + ch,
+                left: cx - w * 0.5,
+                top: cy + y_shift - h * 0.5,
+                right: cx + w * 0.5,
+                bottom: cy + y_shift + h * 0.5,
             };
 
             let is_sel = i == self.selected;
@@ -84,67 +88,79 @@ impl PickerLayout for WalletLayout {
                     r: 0.1,
                     g: 0.12,
                     b: 0.16,
-                    a: if is_sel { 1.0 } else { (0.9 - abs_off * 0.18).max(0.4) },
+                    a: if is_sel { 1.0 } else { 0.78 },
                 },
             );
 
-            if i < thumbnails.len() {
-                if let Some(ref thumb) = thumbnails[i] {
-                    if let Ok(bmp) = d2d.create_bitmap_from_rgba(thumb.width, thumb.height, &thumb.pixels) {
-                        d2d.draw_bitmap(&bmp, rect, if is_sel { 1.0 } else { 0.75 });
-                    }
+            if i < bitmaps.len() {
+                if let Some(ref bmp) = bitmaps[i] {
+                    d2d.draw_bitmap(bmp, rect, if is_sel { 1.0 } else { 0.8 });
                 }
             }
 
             if is_sel {
                 d2d.draw_rounded_rect(rect, 16.0, accent, 2.5);
+            } else {
+                d2d.draw_rounded_rect(
+                    rect,
+                    16.0,
+                    D2D1_COLOR_F {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 0.10,
+                    },
+                    1.0,
+                );
             }
         }
 
-        if self.selected < windows.len() {
-            let title = &windows[self.selected].title;
-            let title_rect = D2D_RECT_F {
-                left: 100.0,
-                top: cy + self.card_h * 0.5 + 26.0,
-                right: sw - 100.0,
-                bottom: cy + self.card_h * 0.5 + 56.0,
-            };
-            d2d.draw_text(
-                title,
-                title_rect,
-                D2D1_COLOR_F {
-                    r: 0.95,
-                    g: 0.96,
-                    b: 0.98,
-                    a: 1.0,
-                },
-                16.0,
-                true,
-                true,
-            );
-        }
+        // Title
+        let title_rect = D2D_RECT_F {
+            left: 40.0,
+            top: cy - self.card_h * 0.5 - 54.0,
+            right: sw - 40.0,
+            bottom: cy - self.card_h * 0.5 - 18.0,
+        };
+        let title = if self.selected < windows.len() {
+            &windows[self.selected].title
+        } else {
+            ""
+        };
+        d2d.draw_text(
+            title,
+            title_rect,
+            D2D1_COLOR_F {
+                r: 0.95,
+                g: 0.96,
+                b: 1.0,
+                a: 1.0,
+            },
+            18.0,
+            true,
+            true,
+        );
     }
 
     fn hit_test(&self, px: f32, py: f32, count: usize, sw: f32, sh: f32) -> Option<usize> {
-        let n = count;
-        if n == 0 {
-            return None;
-        }
-
-        let cx = sw * 0.5;
         let cy = sh * 0.5 - 10.0;
+        let cx = sw * 0.5;
 
-        for i in 0..n {
+        for i in 0..count {
             let offset = i as f32 - self.selected as f32;
-            let y = cy + offset * self.card_h * 0.38 - self.card_h * 0.5;
-            let x = cx - self.card_w * 0.5;
+            let y_shift = if offset < 0.0 {
+                offset * 48.0
+            } else {
+                offset * 54.0
+            };
 
-            if px >= x && px <= x + self.card_w && py >= y && py <= y + self.card_h {
+            let w = self.card_w;
+            let h = self.card_h;
+
+            if px >= cx - w * 0.5 && px <= cx + w * 0.5 && py >= cy + y_shift - h * 0.5 && py <= cy + y_shift + h * 0.5 {
                 return Some(i);
             }
         }
-
         None
     }
 }
-
