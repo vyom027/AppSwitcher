@@ -35,8 +35,11 @@ class SettingsWindow(QtWidgets.QWidget):
         form.setVerticalSpacing(12)
 
         self.anim = QtWidgets.QComboBox()
-        self.anim.addItems(list(S.ANIMATIONS.keys()))
-        self.anim.setCurrentText(S.SETTINGS.get("animation", "slide"))
+        self.anim.addItems([k for k in S.ANIMATIONS.keys() if k != "duo_fold"])
+        cur_a = S.SETTINGS.get("animation", "slide")
+        if cur_a == "duo_fold":
+            cur_a = "Duo Fold"
+        self.anim.setCurrentText(cur_a)
 
         self.layout_cb = QtWidgets.QComboBox()
         self.layout_cb.addItems(_layout_names())

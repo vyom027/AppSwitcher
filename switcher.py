@@ -9,8 +9,11 @@ import sys
 import time
 import math
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import ctypes
 import ctypes.wintypes
+
+_THREAD_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="AppSwitcherWorker")
 
 import win32gui
 import win32ui
@@ -213,7 +216,18 @@ def _is_alt_tab_window(hwnd):
         return False
     return True
 
-def get_open_windows():
+_win_cache = {"ts": 0.0, "data": [], "lock": threading.Lock()}
+WIN_CACHE_TTL = 0.25
+
+def invalidate_window_cache():
+    with _win_cache["lock"]:
+        _win_cache["ts"] = 0.0
+
+def get_open_windows(force=False):
+    now = time.time()
+    with _win_cache["lock"]:
+        if not force and (now - _win_cache["ts"]) < WIN_CACHE_TTL and _win_cache["data"]:
+            return list(_win_cache["data"])
     windows = []
     def cb(hwnd, _):
         if _is_alt_tab_window(hwnd):
@@ -223,6 +237,9 @@ def get_open_windows():
     blocked = set(SETTINGS.get("blocklist", []))
     if blocked:
         windows = [(h, t) for (h, t) in windows if t not in blocked]
+    with _win_cache["lock"]:
+        _win_cache["ts"] = time.time()
+        _win_cache["data"] = list(windows)
     return windows
 
 def list_open_titles():
@@ -317,6 +334,7 @@ def bring_to_front(hwnd):
     background" wait cursor). SwitchToThisWindow is only a fallback because it
     simulates Alt-Tab and triggers that spinning cursor. Never raises.
     """
+    invalidate_window_cache()
     user32 = ctypes.windll.user32
     try:
         if win32gui.IsIconic(hwnd):
@@ -664,7 +682,7 @@ def prewarm_windows():
             skip = {hh for hh in targets
                     if (v := _frame_cache.get(hh)) and now - v["ts"] < CAP_TTL}
         for hh in targets - skip:
-            threading.Thread(target=_prewarm_one, args=(hh, w, h), daemon=True).start()
+            _THREAD_POOL.submit(_prewarm_one, hh, w, h)
     except Exception:
         pass
 
@@ -807,6 +825,178 @@ def _yrot(item, sw, sh, angle):
     tr.translate(-sw / 2, -sh / 2)
     item.setTransform(tr)
 
+# ─── Duo Fold Transition Controller ──────────────────────────────────────────
+class DuoFoldController:
+    """True perspective projective Duo Fold transition (iPhone Solo / Duo style).
+
+    Features:
+      • Real projective 3D perspective geometry via QTransform.quadToQuad
+      • Pinned physical edge hinge (left/right according to swipe/Alt+Tab direction)
+      • Distance-dependent progressive blur (sharp near hinge -> deeply frosted at far edge)
+      • Depth-dependent darkening toward pitch black void
+      • Subtle specular glass reflection highlight at ~70% from hinge
+      • Physical spatial handoff: Current folds back into void, Next unfolds forward
+      • Zero ghosting: surfaces remain fully opaque, avoiding transparent crossfade
+    """
+    def __init__(self, pc, pn, sw, sh, direction):
+        self.pc = pc
+        self.pn = pn
+        self.sw, self.sh = sw, sh
+        self.bw, self.bh = max(64, sw // 2), max(64, sh // 2)
+        self.direction = direction
+
+        self.curr_hinge_left = (direction > 0)
+        self.next_hinge_left = (direction <= 0)
+
+        scene = pc.scene()
+        self.bg = scene.addRect(0, 0, sw, sh, QtCore.Qt.NoPen, QtGui.QColor(4, 6, 8))
+        self.bg.setZValue(0)
+
+        # Base items: physical depth layering
+        self.pn.setZValue(5)
+        self.pc.setZValue(10)
+
+        # Precompute creamy Apple frosted glass & optical overlays
+        self.c_blur = scene.addPixmap(self._make_apple_glass(pc.pixmap(), self.curr_hinge_left))
+        self.c_blur.setZValue(11)
+
+        self.n_blur = scene.addPixmap(self._make_apple_glass(pn.pixmap(), self.next_hinge_left))
+        self.n_blur.setZValue(6)
+
+        self.poly_in_full = QtGui.QPolygonF([
+            QtCore.QPointF(0, 0),
+            QtCore.QPointF(sw, 0),
+            QtCore.QPointF(sw, sh),
+            QtCore.QPointF(0, sh)
+        ])
+        self.poly_in_blur = QtGui.QPolygonF([
+            QtCore.QPointF(0, 0),
+            QtCore.QPointF(self.bw, 0),
+            QtCore.QPointF(self.bw, self.bh),
+            QtCore.QPointF(0, self.bh)
+        ])
+        self.aspect = sw / float(sh)
+        # 1.45 gives rich, palpable Apple-grade 3D perspective convergence
+        self.eye = 1.45 * max(self.aspect, 1.0)
+        self.MAX_BEND_C = math.radians(78.0)
+        self.MAX_BEND_N = math.radians(24.0)
+
+    def _make_apple_glass(self, pix, hinge_left):
+        bw, bh = self.bw, self.bh
+        # High-definition multi-scale frosted blur
+        s1 = pix.scaled(bw, bh, QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.FastTransformation)
+        s2 = s1.scaled(bw // 4, bh // 4, QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.SmoothTransformation)
+        blur = s2.scaled(bw, bh, QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.SmoothTransformation)
+
+        p = QtGui.QPainter(blur)
+        stops = 32
+
+        # 1. Optical defocus falloff mask: pow(smoothstep(0.0, 0.7, fromHinge), 1.45)
+        mask_grad = QtGui.QLinearGradient(0, 0, bw, 0)
+        for i in range(stops + 1):
+            pos = i / float(stops)
+            from_h = pos if hinge_left else (1.0 - pos)
+            t_ss = max(0.0, min(1.0, from_h / 0.70))
+            ss = t_ss * t_ss * (3.0 - 2.0 * t_ss)
+            spread = math.pow(ss, 1.45)
+            alpha = int(255 * (0.04 + 0.96 * spread))
+            mask_grad.setColorAt(pos, QtGui.QColor(0, 0, 0, alpha))
+        p.setCompositionMode(QtGui.QPainter.CompositionMode_DestinationIn)
+        p.fillRect(0, 0, bw, bh, mask_grad)
+
+        # 2. Deep void occlusion: clamp((fromHinge - 0.26) / 0.74, 0.0, 1.0)
+        p.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)
+        dark_grad = QtGui.QLinearGradient(0, 0, bw, 0)
+        for i in range(stops + 1):
+            pos = i / float(stops)
+            from_h = pos if hinge_left else (1.0 - pos)
+            fade = max(0.0, min(1.0, (from_h - 0.26) / 0.74))
+            dark_alpha = int(248 * math.pow(fade, 1.4))
+            dark_grad.setColorAt(pos, QtGui.QColor(4, 6, 8, dark_alpha))
+        p.fillRect(0, 0, bw, bh, dark_grad)
+
+        # 3. Soft Gaussian specular glass reflection: exp(-pow((fromHinge - 0.70) / 0.20, 2.0))
+        glass_grad = QtGui.QLinearGradient(0, 0, bw, 0)
+        for i in range(stops + 1):
+            pos = i / float(stops)
+            from_h = pos if hinge_left else (1.0 - pos)
+            refl = math.exp(-math.pow((from_h - 0.70) / 0.20, 2.0))
+            glass_alpha = int(85 * refl)
+            glass_grad.setColorAt(pos, QtGui.QColor(235, 245, 255, glass_alpha))
+        p.fillRect(0, 0, bw, bh, glass_grad)
+
+        p.end()
+        return blur
+
+    def _calc_quad(self, hinge_left, bend):
+        cosine = math.cos(bend)
+        sine = math.sin(bend)
+
+        sw, sh = self.sw, self.sh
+        hinge_x = 0.0 if hinge_left else sw
+        cy = sh / 2.0
+
+        px_hinge = hinge_x
+        h_hinge = cy
+
+        depth_far = 1.35 * self.aspect * sine
+        persp_far = self.eye / (self.eye + depth_far)
+        far_x = sw if hinge_left else 0.0
+        px_far = hinge_x + (far_x - hinge_x) * cosine * persp_far
+        h_far = cy * persp_far
+
+        if hinge_left:
+            poly_out = QtGui.QPolygonF([
+                QtCore.QPointF(px_hinge, cy - h_hinge),
+                QtCore.QPointF(px_far, cy - h_far),
+                QtCore.QPointF(px_far, cy + h_far),
+                QtCore.QPointF(px_hinge, cy + h_hinge)
+            ])
+        else:
+            poly_out = QtGui.QPolygonF([
+                QtCore.QPointF(px_far, cy - h_far),
+                QtCore.QPointF(px_hinge, cy - h_hinge),
+                QtCore.QPointF(px_hinge, cy + h_hinge),
+                QtCore.QPointF(px_far, cy + h_far)
+            ])
+
+        tr_full = QtGui.QTransform()
+        QtGui.QTransform.quadToQuad(self.poly_in_full, poly_out, tr_full)
+        tr_blur = QtGui.QTransform()
+        QtGui.QTransform.quadToQuad(self.poly_in_blur, poly_out, tr_blur)
+        return tr_full, tr_blur
+
+    def update(self, t):
+        # Current panel folds away around its hinge into the void
+        bend_c = t * self.MAX_BEND_C
+        tr_fc, tr_bc = self._calc_quad(self.curr_hinge_left, bend_c)
+        op_c = max(0.0, 1.0 - (t - 0.55) / 0.45) if t > 0.55 else 1.0
+        blur_c = math.pow(t, 0.55)
+
+        self.pc.setTransform(tr_fc)
+        self.pc.setOpacity(op_c)
+        self.c_blur.setTransform(tr_bc)
+        self.c_blur.setOpacity(op_c * blur_c)
+
+        # Next panel unfolds forward from depth with spatial presence
+        bend_n = (1.0 - t) * self.MAX_BEND_N
+        tr_fn, tr_bn = self._calc_quad(self.next_hinge_left, bend_n)
+        op_n = 0.50 + 0.50 * t
+        blur_n = math.pow(1.0 - t, 0.7) * 0.45
+
+        self.pn.setTransform(tr_fn)
+        self.pn.setOpacity(op_n)
+        self.n_blur.setTransform(tr_bn)
+        self.n_blur.setOpacity(op_n * blur_n)
+
+_duo_ctrl = None
+
+def _a_duo_fold(t, pc, pn, sw, sh, d):
+    global _duo_ctrl
+    if t <= 0.0001 or _duo_ctrl is None:
+        _duo_ctrl = DuoFoldController(pc, pn, sw, sh, d)
+    _duo_ctrl.update(t)
+
 def _a_slide(t, pc, pn, sw, sh, d):
     pc.setPos(d * t * sw, 0); pn.setPos(-d * (1 - t) * sw, 0)
 
@@ -839,6 +1029,7 @@ def _a_stack(t, pc, pn, sw, sh, d):         # next rises up over current
 ANIMATIONS = {
     "slide": _a_slide, "fade": _a_fade, "push": _a_push, "zoom": _a_zoom,
     "cube": _a_cube, "flip": _a_flip, "stack": _a_stack,
+    "Duo Fold": _a_duo_fold, "duo_fold": _a_duo_fold,
 }
 
 
@@ -880,7 +1071,8 @@ class SlideAnimator:
         pn = ov.scene.addPixmap(npix)
         pc.setTransformOriginPoint(rw / 2, rh / 2)
         pn.setTransformOriginPoint(rw / 2, rh / 2)
-        frame = ANIMATIONS.get(SETTINGS["animation"], _a_slide)
+        cur_anim = SETTINGS.get("animation", "slide")
+        frame = ANIMATIONS.get(cur_anim, _a_slide)
         frame(0.0, pc, pn, rw, rh, direction)     # initial state
         _slide_active[0] = True                   # defer pre-builds until done
         _t2 = time.time()
@@ -896,22 +1088,27 @@ class SlideAnimator:
                 return
             done["f"] = True
             _slide_active[0] = False
+            global _duo_ctrl
+            _duo_ctrl = None
             if commit:
                 bring_to_front(next_hwnd)    # switch behind the last frame
                 QtCore.QTimer.singleShot(160, nudge_cursor)
                 QtCore.QTimer.singleShot(380, nudge_cursor)
                 # foreground changed -> rewarm so a follow-up swipe is instant
-                threading.Thread(target=prewarm_windows, daemon=True).start()
+                invalidate_window_cache()
+                _THREAD_POOL.submit(prewarm_windows)
             ov.destroy_overlay()
             if on_done:
                 on_done()
 
-        dur = int(float(SETTINGS.get("duration", ANIM_DURATION)) * 1000)
+        dur = max(80, int(float(SETTINGS.get("duration", ANIM_DURATION)) * 1000))
+        easing = QtCore.QEasingCurve.OutCubic
+
         anim = QtCore.QVariantAnimation(ov)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
-        anim.setDuration(max(80, dur))
-        anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        anim.setDuration(dur)
+        anim.setEasingCurve(easing)
         def _on_val(t):
             if DEBUG and _frame0["t"] is not None:
                 print(f"[slide] first frame +{int((time.time()-_frame0['t'])*1000)}ms", flush=True)
@@ -1004,14 +1201,15 @@ class SlideAnimator:
                     if ov._closed or state["done"]:
                         break
                     fresh = [None] * len(windows)
-                    cths = [threading.Thread(
-                        target=lambda i=i: fresh.__setitem__(i, _safe_capture(windows[i][0])),
-                        daemon=True) for i in range(len(windows))]
-                    for ct in cths:
-                        ct.start()
+                    futures = [_THREAD_POOL.submit(_safe_capture, windows[i][0])
+                               for i in range(len(windows))]
                     dl = time.time() + 0.6
-                    for ct in cths:
-                        ct.join(timeout=max(0.0, dl - time.time()))
+                    for i, fut in enumerate(futures):
+                        rem = max(0.0, dl - time.time())
+                        try:
+                            fresh[i] = fut.result(timeout=rem)
+                        except Exception:
+                            fresh[i] = None
                     if ov._closed or state["done"]:
                         break
                     def _apply(f=fresh):
@@ -1026,7 +1224,7 @@ class SlideAnimator:
                         if changed:
                             layout.update(state["focus"], state["selected"])
                     post(_apply)
-            threading.Thread(target=_live_loop, daemon=True).start()
+            _THREAD_POOL.submit(_live_loop)
 
             timer = QtCore.QTimer(ov)
             def finish(idx):
@@ -1058,6 +1256,7 @@ class SlideAnimator:
                     return
                 try:
                     win32gui.PostMessage(windows[hit][0], win32con.WM_CLOSE, 0, 0)
+                    invalidate_window_cache()
                 except Exception:
                     pass
                 finish(None)                  # close window, dismiss picker
@@ -1141,22 +1340,21 @@ class SlideAnimator:
             _tcap = time.time()
             hwnds = [h for h, _ in windows]
             imgs = [None] * n
-            def _worker(i):
-                imgs[i] = _cap(hwnds[i])
-            ths = [threading.Thread(target=_worker, args=(i,), daemon=True)
-                   for i in range(n)]
-            for t in ths:
-                t.start()
+            futures = [_THREAD_POOL.submit(_cap, hwnds[i]) for i in range(n)]
             deadline = time.time() + 1.0          # cap the wait; placeholder the rest
-            for t in ths:
-                t.join(timeout=max(0.0, deadline - time.time()))
+            for i, fut in enumerate(futures):
+                rem = max(0.0, deadline - time.time())
+                try:
+                    imgs[i] = fut.result(timeout=rem)
+                except Exception:
+                    imgs[i] = None
             ready = sum(im is not None for im in imgs)
             imgs = [im if im is not None else _ph() for im in imgs]
             if DEBUG:
                 print(f"[picker] captured {ready}/{n} windows in "
                       f"{int((time.time()-_tcap)*1000)}ms (rest placeholdered)", flush=True)
             post(lambda: _build(imgs))
-        threading.Thread(target=_capture_then_build, daemon=True).start()
+        _THREAD_POOL.submit(_capture_then_build)
 
 
 # ─── App Switcher Core ────────────────────────────────────────────────────────
@@ -1345,7 +1543,7 @@ def handle_arm():
     def _warm():
         prewarm_backdrop()
         prewarm_windows()
-    threading.Thread(target=_warm, daemon=True).start()
+    _THREAD_POOL.submit(_warm)
 
 def handle_alttab(direction):
     # fired from the keyboard hook (background thread) on Alt+Tab

@@ -5,6 +5,7 @@ When enabled, Alt+Tab (and Alt+Shift+Tab) are SWALLOWED so Windows' own switcher
 never fires, and a callback is invoked to drive AppSwitcher's picker instead.
 Install from a thread that runs a message loop (the gesture thread does).
 """
+import time
 import ctypes
 import ctypes.wintypes as wt
 
@@ -68,6 +69,10 @@ enabled = True
 DEBUG = False
 _mod_down = False
 
+_last_fg_hwnd = None
+_last_fg_fs   = False
+_last_fg_ts   = 0.0
+_FS_CACHE_TTL = 0.35
 
 def _foreground_is_fullscreen():
     """True only for a real fullscreen game — a BORDERLESS window covering the
@@ -75,21 +80,30 @@ def _foreground_is_fullscreen():
     window also covers the monitor but keeps its title bar (WS_CAPTION) and the
     maximized state, so we must NOT treat it as fullscreen (else Alt+Tab over any
     maximized app falls back to Windows' own switcher)."""
+    global _last_fg_hwnd, _last_fg_fs, _last_fg_ts
+    now = time.time()
     try:
         h = user32.GetForegroundWindow()
         if not h:
             return False
+        if h == _last_fg_hwnd and (now - _last_fg_ts) < _FS_CACHE_TTL:
+            return _last_fg_fs
+
         hwnd = wt.HWND(h)
         if user32.IsZoomed(hwnd):
+            _last_fg_hwnd, _last_fg_fs, _last_fg_ts = h, False, now
             return False            # maximized normal window, not a game
         style = user32.GetWindowLongW(hwnd, GWL_STYLE)
         if style & WS_CAPTION:
+            _last_fg_hwnd, _last_fg_fs, _last_fg_ts = h, False, now
             return False            # has a title bar -> windowed, not fullscreen
         r = wt.RECT()
         user32.GetWindowRect(hwnd, ctypes.byref(r))
         mw = user32.GetSystemMetrics(0); mh = user32.GetSystemMetrics(1)
-        return (r.left <= 0 and r.top <= 0 and
-                (r.right - r.left) >= mw and (r.bottom - r.top) >= mh)
+        is_fs = bool(r.left <= 0 and r.top <= 0 and
+                     (r.right - r.left) >= mw and (r.bottom - r.top) >= mh)
+        _last_fg_hwnd, _last_fg_fs, _last_fg_ts = h, is_fs, now
+        return is_fs
     except Exception:
         return False
 

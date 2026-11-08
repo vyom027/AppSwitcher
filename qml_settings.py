@@ -120,7 +120,7 @@ class Backend(QtCore.QObject):
     # static lists ----------------------------------------------------------
     @QtCore.Property('QStringList', constant=True)
     def animations(self):
-        return list(S.ANIMATIONS.keys())
+        return [k for k in S.ANIMATIONS.keys() if k != "duo_fold"]
 
     @QtCore.Property('QStringList', constant=True)
     def layoutsList(self):
@@ -130,7 +130,10 @@ class Backend(QtCore.QObject):
     # settings properties ---------------------------------------------------
     @QtCore.Property(str, notify=changed)
     def animation(self):
-        return S.SETTINGS.get("animation", "slide")
+        val = S.SETTINGS.get("animation", "slide")
+        if val == "duo_fold":
+            return "Duo Fold"
+        return val
     @animation.setter
     def animation(self, v):
         S.SETTINGS["animation"] = v; self.changed.emit()

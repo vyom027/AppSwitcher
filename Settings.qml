@@ -6,7 +6,9 @@ import QtQuick.Effects
 
 Window {
     id: win
-    width: 1200; height: 600
+    width: 1200; height: 700
+    minimumWidth: 960
+    minimumHeight: 620
     flags: Qt.FramelessWindowHint | Qt.Window
     color: "transparent"
     visible: false
@@ -173,8 +175,10 @@ Window {
 
             // three columns
             RowLayout {
-                Layout.fillWidth: true; Layout.fillHeight: true; spacing: 18
-
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.minimumHeight: 400
+                spacing: 18
                 // LEFT — Look
                 Card {
                     Layout.preferredWidth: 1; Layout.fillWidth: true; Layout.fillHeight: true
@@ -333,16 +337,73 @@ Window {
             }
 
             // bottom bar
-            RowLayout {
-                Layout.fillWidth: true; spacing: 14
-                Label2 { text: "Replace system switcher"; color: win.text1; font.pixelSize: 14 }
-                IOSSwitch { checked: backend.altTab; onToggled: backend.altTab = v }
-                Rectangle { width: 1; height: 22; color: Qt.rgba(1,1,1,0.12) }
-                Label2 { text: "Start with Windows"; color: win.text1; font.pixelSize: 14 }
-                IOSSwitch { checked: backend.autostart; onToggled: backend.autostart = v }
-                Item { Layout.fillWidth: true }
-                Pill { label: "Save"; primary: true; implicitWidth: 130; implicitHeight: 44
-                    onClicked: { backend.save(); win.visible = false } }
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.minimumHeight: 90
+                Layout.topMargin: 14
+                spacing: 10
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 18
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+
+                        Label2 {
+                            text: "Replace system switcher"
+                            color: win.text1
+                            font.pixelSize: 14
+                            Layout.fillWidth: true
+                        }
+
+                        IOSSwitch {
+                            checked: backend.altTab
+                            onToggled: backend.altTab = v
+                        }
+                    }
+
+                    Rectangle {
+                        width: 1
+                        height: 28
+                        color: Qt.rgba(1,1,1,0.12)
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+
+                        Label2 {
+                            text: "Start with Windows"
+                            color: win.text1
+                            font.pixelSize: 14
+                            Layout.fillWidth: true
+                        }
+
+                        IOSSwitch {
+                            checked: backend.autostart
+                            onToggled: backend.autostart = v
+                        }
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+
+                    Item { Layout.fillWidth: true }
+
+                    Pill {
+                        label: "Save"
+                        primary: true
+                        implicitWidth: 130
+                        implicitHeight: 44
+                        onClicked: {
+                            backend.save()
+                            win.visible = false
+                        }
+                    }
+                }
             }
         }
     }
