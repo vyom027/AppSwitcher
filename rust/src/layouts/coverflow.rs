@@ -81,6 +81,19 @@ impl PickerLayout for CoverflowLayout {
 
             if is_sel {
                 d2d.draw_glow(rect, 18.0, accent, 4);
+                // Classic Apple downward mirror reflection beneath center card
+                if i < bitmaps.len() {
+                    if let Some(ref bmp) = bitmaps[i] {
+                        let refl_h = (h * 0.24).min(45.0);
+                        let refl_rect = D2D_RECT_F {
+                            left: rect.left,
+                            top: rect.bottom + 4.0,
+                            right: rect.right,
+                            bottom: rect.bottom + 4.0 + refl_h,
+                        };
+                        d2d.fill_rounded_bitmap(bmp, refl_rect, 10.0, 0.16);
+                    }
+                }
             }
 
             // Card background

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[derive(Debug, Clone, Copy)]
 pub struct SpringConfig {
     pub tension: f64, // Stiffness (k)

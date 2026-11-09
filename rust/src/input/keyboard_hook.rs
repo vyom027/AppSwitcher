@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::event::{AppEvent, WM_APP_EVENT};
 use crossbeam_channel::Sender;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};

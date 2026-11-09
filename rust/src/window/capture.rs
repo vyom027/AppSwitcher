@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::window::foreground::is_own_window;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -64,15 +66,20 @@ pub fn work_area() -> (i32, i32, i32, i32) {
 
 static BACKDROP_CACHE: LazyLock<Mutex<Option<(Instant, ImageBuffer)>>> =
     LazyLock::new(|| Mutex::new(None));
+static IS_PREWARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 const BACKDROP_TTL: Duration = Duration::from_millis(1500);
 
 pub fn prewarm_backdrop() {
+    if IS_PREWARMING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     thread::spawn(|| {
         let (wx, wy, ww, wh) = work_area();
         if ww > 0 && wh > 0 {
             let bg = capture_frosted_backdrop(wx, wy, ww, wh);
             *BACKDROP_CACHE.lock() = Some((Instant::now(), bg));
         }
+        IS_PREWARMING.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 }
 
@@ -443,83 +450,105 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
             }
         }
 
-        // 2. PrintWindow (PW_RENDERFULLCONTENT = 2)
-        let hdc_window = GetWindowDC(hwnd);
-        if !hdc_window.0.is_null() {
-            let hdc_mem = CreateCompatibleDC(hdc_window);
-            let hbm = CreateCompatibleBitmap(hdc_window, w, h);
-            let old_obj = SelectObject(hdc_mem, hbm);
-
-            let printed = PrintWindow(hwnd, hdc_mem, 2).as_bool();
-            if printed {
-                let mut bmi = BITMAPINFO {
-                    bmiHeader: BITMAPINFOHEADER {
-                        biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                        biWidth: w,
-                        biHeight: -h,
-                        biPlanes: 1,
-                        biBitCount: 32,
-                        biCompression: BI_RGB.0,
-                        biSizeImage: 0,
-                        biXPelsPerMeter: 0,
-                        biYPelsPerMeter: 0,
-                        biClrUsed: 0,
-                        biClrImportant: 0,
-                    },
-                    bmiColors: [windows::Win32::Graphics::Gdi::RGBQUAD::default()],
-                };
-
-                SelectObject(hdc_mem, old_obj);
-
-                let mut raw_pixels = vec![0u8; (w * h * 4) as usize];
-                let lines = GetDIBits(
-                    hdc_mem,
-                    hbm,
-                    0,
-                    h as u32,
-                    Some(raw_pixels.as_mut_ptr() as *mut _),
-                    &mut bmi,
-                    DIB_RGB_COLORS,
-                );
-
-                let _ = DeleteObject(hbm);
-                let _ = DeleteDC(hdc_mem);
-                let _ = ReleaseDC(hwnd, hdc_window);
-
-                if lines > 0 {
-                    // Check if it's completely black
-                    let mut non_black = false;
-                    for chunk in raw_pixels.chunks_exact_mut(4) {
-                        let b = chunk[0];
-                        let g = chunk[1];
-                        let r = chunk[2];
-                        if r > 10 || g > 10 || b > 10 {
-                            non_black = true;
-                        }
-                        chunk[0] = r;
-                        chunk[2] = b;
-                        chunk[3] = 255;
-                    }
-
-                    if non_black {
-                        return Some(ImageBuffer {
-                            width: w as u32,
-                            height: h as u32,
-                            pixels: raw_pixels,
-                        });
-                    }
-                }
-            } else {
-                SelectObject(hdc_mem, old_obj);
-                let _ = DeleteObject(hbm);
-                let _ = DeleteDC(hdc_mem);
-                let _ = ReleaseDC(hwnd, hdc_window);
-            }
+        // 2. PrintWindow (PW_RENDERFULLCONTENT = 2) with hard 120ms timeout to prevent UI freezes
+        if let Some(img) = print_window_with_timeout(hwnd, w, h, Duration::from_millis(120)) {
+            return Some(img);
         }
 
         let title = get_window_title_safe(hwnd);
         Some(create_placeholder(&title, w.max(320) as u32, h.max(200) as u32))
     }
+}
+
+fn print_window_with_timeout(hwnd: HWND, w: i32, h: i32, timeout: Duration) -> Option<ImageBuffer> {
+    if unsafe { windows::Win32::UI::WindowsAndMessaging::IsHungAppWindow(hwnd).as_bool() } {
+        return None;
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let hwnd_raw = hwnd.0 as usize;
+
+    thread::spawn(move || unsafe {
+        let hwnd = HWND(hwnd_raw as *mut _);
+        let hdc_window = GetWindowDC(hwnd);
+        if hdc_window.0.is_null() {
+            let _ = tx.send(None);
+            return;
+        }
+
+        let hdc_mem = CreateCompatibleDC(hdc_window);
+        let hbm = CreateCompatibleBitmap(hdc_window, w, h);
+        let old_obj = SelectObject(hdc_mem, hbm);
+
+        let printed = PrintWindow(hwnd, hdc_mem, 2).as_bool();
+        if printed {
+            let mut bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w,
+                    biHeight: -h,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    biSizeImage: 0,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 0,
+                    biClrImportant: 0,
+                },
+                bmiColors: [windows::Win32::Graphics::Gdi::RGBQUAD::default()],
+            };
+
+            SelectObject(hdc_mem, old_obj);
+
+            let mut raw_pixels = vec![0u8; (w * h * 4) as usize];
+            let lines = GetDIBits(
+                hdc_mem,
+                hbm,
+                0,
+                h as u32,
+                Some(raw_pixels.as_mut_ptr() as *mut _),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+
+            let _ = DeleteObject(hbm);
+            let _ = DeleteDC(hdc_mem);
+            let _ = ReleaseDC(hwnd, hdc_window);
+
+            if lines > 0 {
+                let mut non_black = false;
+                for chunk in raw_pixels.chunks_exact_mut(4) {
+                    let b = chunk[0];
+                    let g = chunk[1];
+                    let r = chunk[2];
+                    if r > 10 || g > 10 || b > 10 {
+                        non_black = true;
+                    }
+                    chunk[0] = r;
+                    chunk[2] = b;
+                    chunk[3] = 255;
+                }
+
+                if non_black {
+                    let _ = tx.send(Some(ImageBuffer {
+                        width: w as u32,
+                        height: h as u32,
+                        pixels: raw_pixels,
+                    }));
+                    return;
+                }
+            }
+        } else {
+            SelectObject(hdc_mem, old_obj);
+            let _ = DeleteObject(hbm);
+            let _ = DeleteDC(hdc_mem);
+            let _ = ReleaseDC(hwnd, hdc_window);
+        }
+        let _ = tx.send(None);
+    });
+
+    rx.recv_timeout(timeout).unwrap_or(None)
 }
 
 /// Capture multiple windows in parallel using a thread pool

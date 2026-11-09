@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[derive(Debug, Clone, Copy)]
 pub struct Point2D {
     pub x: f32,

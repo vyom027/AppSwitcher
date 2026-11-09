@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::event::{AppEvent, WM_APP_EVENT};
 use crate::input::gesture_tracker::GestureTracker;
 use crate::input::hid_parser::{DeviceLayout, UP_DIGITIZER, U_TOUCHPAD};
@@ -191,12 +193,6 @@ pub fn run_input_thread(
 
     let on_arm = || {
         crate::window::capture::prewarm_backdrop();
-        let top_hwnds: Vec<windows::Win32::Foundation::HWND> = crate::window::enumerator::get_open_windows(&[], false)
-            .iter()
-            .take(8)
-            .map(|w| w.hwnd)
-            .collect();
-        crate::window::capture::prewarm_windows(&top_hwnds);
     };
 
     *TRACKER.lock() = Some(GestureTracker::new(

@@ -152,62 +152,131 @@ impl TransitionKind {
 
                 d2d.draw_bitmap(next, next_rect, 1.0);
             }
-            Self::Cube | Self::Flip => {
-                // 3D perspective panel flip
-                d2d.fill_rounded_rect(
-                    D2D_RECT_F {
-                        left: 0.0,
-                        top: 0.0,
-                        right: sw,
-                        bottom: sh,
-                    },
-                    0.0,
-                    D2D1_COLOR_F {
-                        r: 0.02,
-                        g: 0.03,
-                        b: 0.05,
-                        a: 1.0,
-                    },
-                );
-
+            Self::Cube => {
+                let dir = direction as f32;
+                let angle_curr = -dir * t * 90.0f32.to_radians();
+                let angle_next = dir * (1.0 - t) * 90.0f32.to_radians();
+                render_3d_rot_panel(d2d, curr, angle_curr, (1.0 - t * 0.4).max(0.0), sw, sh);
+                render_3d_rot_panel(d2d, next, angle_next, (0.6 + t * 0.4).min(1.0), sw, sh);
+            }
+            Self::Flip => {
+                // True 3D perspective rotation around center Y-axis with physical foreshortening
                 let dir = direction as f32;
                 if t < 0.5 {
                     let sub_t = t / 0.5;
-                    let angle = sub_t * 85.0f32.to_radians();
-                    let cos = angle.cos();
-                    let sin = angle.sin();
-                    let scale_x = cos;
-                    let scale_y = 1.0 - sin * 0.22;
-                    let w = sw * scale_x;
-                    let h = sh * scale_y;
-                    let cx = sw * 0.5 - dir * (1.0 - cos) * sw * 0.25;
-                    let cy = sh * 0.5;
-                    let rect = D2D_RECT_F {
-                        left: cx - w * 0.5,
-                        top: cy - h * 0.5,
-                        right: cx + w * 0.5,
-                        bottom: cy + h * 0.5,
-                    };
-                    d2d.draw_bitmap(curr, rect, 1.0 - sub_t * 0.4);
+                    let angle = -dir * sub_t * 90.0f32.to_radians();
+                    render_3d_rot_panel(d2d, curr, angle, 1.0, sw, sh);
                 } else {
                     let sub_t = (t - 0.5) / 0.5;
-                    let angle = (1.0 - sub_t) * 85.0f32.to_radians();
-                    let cos = angle.cos();
-                    let sin = angle.sin();
-                    let scale_x = cos;
-                    let scale_y = 1.0 - sin * 0.22;
-                    let w = sw * scale_x;
-                    let h = sh * scale_y;
-                    let cx = sw * 0.5 + dir * (1.0 - cos) * sw * 0.25;
-                    let cy = sh * 0.5;
-                    let rect = D2D_RECT_F {
-                        left: cx - w * 0.5,
-                        top: cy - h * 0.5,
-                        right: cx + w * 0.5,
-                        bottom: cy + h * 0.5,
-                    };
-                    d2d.draw_bitmap(next, rect, 0.6 + sub_t * 0.4);
+                    let angle = dir * (1.0 - sub_t) * 90.0f32.to_radians();
+                    render_3d_rot_panel(d2d, next, angle, 1.0, sw, sh);
                 }
+            }
+        }
+    }
+}
+
+/// Authentic 3D perspective rotation around center Y-axis using fine vertical strips
+fn render_3d_rot_panel(
+    d2d: &D2DContext,
+    bitmap: &ID2D1Bitmap,
+    angle_rad: f32,
+    opacity: f32,
+    sw: f32,
+    sh: f32,
+) {
+    let sz = unsafe { bitmap.GetSize() };
+    if sz.width <= 0.0 || sz.height <= 0.0 {
+        return;
+    }
+
+    let cosine = angle_rad.cos();
+    let sine = angle_rad.sin();
+    let cy = sh * 0.5;
+    let cx = sw * 0.5;
+
+    let eye = 1.6 * sw;
+    let strips = 64;
+    let inv_strips = 1.0 / strips as f32;
+
+    for i in 0..strips {
+        let u0 = i as f32 * inv_strips;
+        let u1 = (i + 1) as f32 * inv_strips;
+
+        // X relative to center in original panel coordinates [-sw/2, sw/2]
+        let rx0 = (u0 - 0.5) * sw;
+        let rx1 = (u1 - 0.5) * sw;
+
+        // 3D coordinates after Y-axis rotation
+        let x3d_0 = rx0 * cosine;
+        let z3d_0 = rx0 * sine;
+
+        let x3d_1 = rx1 * cosine;
+        let z3d_1 = rx1 * sine;
+
+        // Perspective foreshortening
+        let p0 = eye / (eye + z3d_0);
+        let p1 = eye / (eye + z3d_1);
+
+        let sx0 = cx + x3d_0 * p0;
+        let sx1 = cx + x3d_1 * p1;
+
+        let h0 = sh * p0;
+        let h1 = sh * p1;
+        let h_avg = (h0 + h1) * 0.5;
+
+        let left = sx0.min(sx1);
+        let right = sx0.max(sx1) + 0.6; // slight subpixel overlap to prevent seams
+        let top = cy - h_avg * 0.5;
+        let bottom = cy + h_avg * 0.5;
+
+        let dst_rect = D2D_RECT_F {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        let src_rect = D2D_RECT_F {
+            left: u0 * sz.width,
+            top: 0.0,
+            right: u1 * sz.width,
+            bottom: sz.height,
+        };
+
+        // 1. Draw projected strip
+        d2d.draw_bitmap_subrect(bitmap, dst_rect, src_rect, opacity);
+
+        // 2. Liquid Glass 3D Depth Shading: darkening for surface facing away
+        let z_norm = ((z3d_0 + z3d_1) * 0.5 / (sw * 0.5)).clamp(-1.0, 1.0);
+        let depth_dark = if z_norm > 0.0 { z_norm * 0.65 } else { 0.0 };
+        if depth_dark > 0.01 {
+            d2d.fill_rounded_rect(
+                dst_rect,
+                0.0,
+                D2D1_COLOR_F {
+                    r: 0.02,
+                    g: 0.03,
+                    b: 0.05,
+                    a: (depth_dark * opacity).clamp(0.0, 1.0),
+                },
+            );
+        }
+
+        // 3. Specular highlight when edge sweeps through center
+        let ang_norm = angle_rad.abs().to_degrees();
+        if ang_norm < 45.0 {
+            let spec = (1.0 - (u0 - 0.5).abs() * 2.0).powi(2) * (1.0 - ang_norm / 45.0);
+            if spec > 0.02 {
+                d2d.fill_rounded_rect(
+                    dst_rect,
+                    0.0,
+                    D2D1_COLOR_F {
+                        r: 0.95,
+                        g: 0.98,
+                        b: 1.0,
+                        a: (spec * 0.22 * opacity).clamp(0.0, 1.0),
+                    },
+                );
             }
         }
     }

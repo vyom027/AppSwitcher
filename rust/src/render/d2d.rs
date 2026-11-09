@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use windows::core::{w, Interface};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{

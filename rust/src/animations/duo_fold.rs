@@ -42,7 +42,7 @@ impl DuoFoldTransition {
         let curr_hinge_left = self.direction > 0;
         let next_hinge_left = self.direction <= 0;
 
-        // 1. Deep modern obsidian void backdrop behind folding panels
+        // 1. Subtle obsidian void shadow over frosted backdrop behind folding panels
         d2d.fill_rounded_rect(
             D2D_RECT_F {
                 left: 0.0,
@@ -55,7 +55,7 @@ impl DuoFoldTransition {
                 r: 0.02,
                 g: 0.03,
                 b: 0.05,
-                a: 1.0,
+                a: 0.45 * t,
             },
         );
 
@@ -124,7 +124,7 @@ impl DuoFoldTransition {
         let far_x = if hinge_left { sw } else { 0.0 };
         let cy = sh * 0.5;
 
-        let strips = 48;
+        let strips = 72;
         let inv_strips = 1.0 / strips as f32;
 
         for i in 0..strips {
@@ -134,6 +134,7 @@ impl DuoFoldTransition {
             // Distance from hinge in [0, 1]
             let fh0 = if hinge_left { u0 } else { 1.0 - u0 };
             let fh1 = if hinge_left { u1 } else { 1.0 - u1 };
+            let fh_avg = (fh0 + fh1) * 0.5;
 
             let d0 = 1.35 * aspect * sine * fh0;
             let d1 = 1.35 * aspect * sine * fh1;
@@ -146,11 +147,12 @@ impl DuoFoldTransition {
 
             let h0 = cy * p0;
             let h1 = cy * p1;
+            let h_avg = (h0 + h1) * 0.5;
 
             let left = x0.min(x1);
-            let right = x0.max(x1).max(left + 1.0);
-            let top = cy - h0.max(h1);
-            let bottom = cy + h0.max(h1);
+            let right = x0.max(x1) + 0.6; // Slight overlap prevents subpixel rendering seam
+            let top = cy - h_avg;
+            let bottom = cy + h_avg;
 
             let dst_rect = D2D_RECT_F {
                 left,
@@ -165,11 +167,55 @@ impl DuoFoldTransition {
                 bottom: sz.height,
             };
 
-            // Depth-dependent darkening into the void
-            let depth_darken = 1.0 - 0.35 * fh0 * sine;
-            let strip_opacity = (opacity * depth_darken).clamp(0.0, 1.0);
+            // 1. Draw projected bitmap strip
+            d2d.draw_bitmap_subrect(bitmap, dst_rect, src_rect, opacity);
 
-            d2d.draw_bitmap_subrect(bitmap, dst_rect, src_rect, strip_opacity);
+            // 2. Liquid Glass Deep Void Occlusion Shading
+            let dark_fade = ((fh_avg - 0.22) / 0.78).clamp(0.0, 1.0);
+            let dark_alpha = (0.88 * dark_fade.powf(1.4) * sine * opacity).clamp(0.0, 1.0);
+            if dark_alpha > 0.005 {
+                d2d.fill_rounded_rect(
+                    dst_rect,
+                    0.0,
+                    D2D1_COLOR_F {
+                        r: 0.02,
+                        g: 0.03,
+                        b: 0.05,
+                        a: dark_alpha,
+                    },
+                );
+            }
+
+            // 3. Liquid Glass Gaussian Specular Reflection Glint
+            let refl = (-((fh_avg - 0.68) / 0.18).powi(2)).exp();
+            let glass_alpha = (0.28 * refl * (1.0 - bend / 1.45) * opacity).clamp(0.0, 1.0);
+            if glass_alpha > 0.005 {
+                d2d.fill_rounded_rect(
+                    dst_rect,
+                    0.0,
+                    D2D1_COLOR_F {
+                        r: 0.92,
+                        g: 0.96,
+                        b: 1.0,
+                        a: glass_alpha,
+                    },
+                );
+            }
+
+            // 4. Subtle Hinge Edge Drop Shadow
+            let hinge_shadow = ((1.0 - fh_avg / 0.20).clamp(0.0, 1.0) * sine * 0.32 * opacity).clamp(0.0, 1.0);
+            if hinge_shadow > 0.005 {
+                d2d.fill_rounded_rect(
+                    dst_rect,
+                    0.0,
+                    D2D1_COLOR_F {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: hinge_shadow,
+                    },
+                );
+            }
         }
     }
 }

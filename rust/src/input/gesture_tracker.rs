@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -166,21 +168,14 @@ impl GestureTracker {
             return;
         }
 
-        // Swipe travel check
+        // Swipe travel check: One 3-finger swipe stroke executes exactly ONE switch
+        // Fingers must lift and re-engage for subsequent swipes (eliminates multi-play glitch)
         let dx = avg_x - self.base_x;
         let dy = (avg_y - self.base_y).abs();
-        let elapsed_since_swipe = now.duration_since(self.last_swipe).as_millis();
 
         if !self.swiped && dx.abs() >= SWIPE_THRESHOLD && dy < dx.abs() * 0.9 {
             let dir = if dx > 0.0 { 1 } else { -1 };
             self.swiped = true;
-            self.last_swipe = now;
-            (self.on_swipe)(dir);
-            self.base_x = avg_x;
-            self.base_y = avg_y;
-            self.still_since = now;
-        } else if self.swiped && dx.abs() >= (SWIPE_THRESHOLD * 2.2) && elapsed_since_swipe >= 450 && dy < dx.abs() * 0.9 {
-            let dir = if dx > 0.0 { 1 } else { -1 };
             self.last_swipe = now;
             (self.on_swipe)(dir);
             self.base_x = avg_x;

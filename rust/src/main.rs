@@ -27,9 +27,12 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_MENU,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage, TranslateMessage, MSG,
+    DisableProcessWindowsGhosting, DispatchMessageW, GetMessageW, PeekMessageW, PostMessageW,
+    PostQuitMessage, TranslateMessage, MSG, PM_REMOVE,
 };
 
 static IS_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -129,9 +132,10 @@ fn send_shortcut(mods: &[u32], vk: u32) {
 }
 
 fn main() {
-    // 1. Enable Windows 11 Per-Monitor V2 DPI awareness
+    // 1. Enable Windows 11 Per-Monitor V2 DPI awareness & disable OS ghosting
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        DisableProcessWindowsGhosting();
     }
 
     // 2. Single-instance check
@@ -248,13 +252,49 @@ fn main() {
                             };
                             let mru = sort_by_mru(get_open_windows(&blocklist, false));
                             if mru.len() >= 2 {
+                                let start_idx = if direction > 0 { 1 } else { mru.len() - 1 };
+
+                                // Quick Alt+Tab detection (matches Python / Windows native behavior):
+                                // If user quickly taps Alt+Tab (<100ms), switch immediately without opening or flashing the picker!
+                                let mod_vk = if use_ctrl { VK_CONTROL } else { VK_MENU };
+                                let mut quick_tap = false;
+                                let wait_start = std::time::Instant::now();
+                                while wait_start.elapsed() < std::time::Duration::from_millis(100) {
+                                    let is_mod_down = (GetAsyncKeyState(mod_vk.0 as i32) as u16 & 0x8000) != 0;
+                                    if !is_mod_down {
+                                        quick_tap = true;
+                                        break;
+                                    }
+                                    let mut pmsg = MSG::default();
+                                    while PeekMessageW(&mut pmsg, None, 0, 0, PM_REMOVE).as_bool() {
+                                        if pmsg.message == WM_APP_EVENT {
+                                            while let Ok(ev) = event_rx.try_recv() {
+                                                if matches!(ev, AppEvent::AltTabRelease) {
+                                                    quick_tap = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        let _ = TranslateMessage(&pmsg);
+                                        DispatchMessageW(&pmsg);
+                                    }
+                                    if quick_tap {
+                                        break;
+                                    }
+                                    thread::sleep(std::time::Duration::from_millis(4));
+                                }
+
+                                if quick_tap {
+                                    commit_window_switch(&overlay, &settings, &mru, start_idx);
+                                    continue;
+                                }
+
                                 let accent = D2D1_COLOR_F {
                                     r: accent_rgb[0] as f32 / 255.0,
                                     g: accent_rgb[1] as f32 / 255.0,
                                     b: accent_rgb[2] as f32 / 255.0,
                                     a: 1.0,
                                 };
-                                let start_idx = if direction > 0 { 1 } else { mru.len() - 1 };
                                 if let Some(sel) = overlay.run_picker(
                                     &mru,
                                     start_idx,

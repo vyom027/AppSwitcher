@@ -404,7 +404,18 @@ impl OverlayWindow {
             }
         };
 
+        // Quick Alt+Tab tap check before window reveal
+        if mode == PickerMode::AltTab {
+            let mod_vk = if use_ctrl { VK_CONTROL } else { VK_MENU };
+            let is_mod_down = unsafe { (GetAsyncKeyState(mod_vk.0 as i32) as u16 & 0x8000) != 0 };
+            if !is_mod_down {
+                return Some(initial);
+            }
+        }
+
         self.show();
+        let show_start = Instant::now();
+        let fade_dur = 0.12f32;
 
         loop {
             let dt = last_frame.elapsed().as_secs_f64();
@@ -536,7 +547,10 @@ impl OverlayWindow {
             }
             layout.update(spring.value as f32, selected);
 
-            // 4. Render 120Hz/144Hz frame
+            // 4. Render 120Hz/144Hz frame with smooth fade-in
+            let alpha = (show_start.elapsed().as_secs_f32() / fade_dur).min(1.0);
+            let eased_alpha = 1.0 - (1.0 - alpha).powi(3);
+
             self.d2d.begin_draw();
 
             // Draw blurred desktop frosted glass backdrop
@@ -549,38 +563,38 @@ impl OverlayWindow {
                         right: sw,
                         bottom: sh,
                     },
-                    1.0,
+                    eased_alpha,
                 );
             } else {
-                self.d2d.clear(0.06, 0.08, 0.12, 1.0);
+                self.d2d.clear(0.04, 0.05, 0.08, eased_alpha);
             }
 
-            // Top Pill Badge
-            let pill_w = (hint_text.len() as f32 * 7.5 + 40.0).clamp(320.0, 580.0);
+            // Top Pill Badge (Refined Liquid Glass Capsule)
+            let pill_w = (hint_text.len() as f32 * 6.8 + 32.0).clamp(260.0, 520.0);
             let pill_rect = D2D_RECT_F {
                 left: (sw - pill_w) * 0.5,
-                top: 16.0,
+                top: 14.0,
                 right: (sw + pill_w) * 0.5,
-                bottom: 44.0,
+                bottom: 40.0,
             };
             self.d2d.fill_rounded_rect(
                 pill_rect,
-                14.0,
+                13.0,
                 D2D1_COLOR_F {
-                    r: 0.05,
-                    g: 0.07,
-                    b: 0.10,
-                    a: 0.82,
+                    r: 0.04,
+                    g: 0.06,
+                    b: 0.09,
+                    a: 0.78 * eased_alpha,
                 },
             );
             self.d2d.draw_rounded_rect(
                 pill_rect,
-                14.0,
+                13.0,
                 D2D1_COLOR_F {
                     r: 1.0,
                     g: 1.0,
                     b: 1.0,
-                    a: 0.12,
+                    a: 0.10 * eased_alpha,
                 },
                 1.0,
             );
@@ -588,12 +602,12 @@ impl OverlayWindow {
                 &hint_text,
                 pill_rect,
                 D2D1_COLOR_F {
-                    r: 0.90,
-                    g: 0.92,
-                    b: 0.96,
-                    a: 0.95,
+                    r: 0.88,
+                    g: 0.90,
+                    b: 0.95,
+                    a: 0.90 * eased_alpha,
                 },
-                11.5,
+                11.0,
                 false,
                 true,
             );
