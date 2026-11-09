@@ -23,10 +23,7 @@ use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
-use windows::Win32::Graphics::Dwm::{
-    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_TRANSIENTWINDOW,
-    DWMWA_SYSTEMBACKDROP_TYPE,
-};
+use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -61,7 +58,16 @@ unsafe extern "system" fn overlay_wnd_proc(
     w_param: WPARAM,
     l_param: LPARAM,
 ) -> LRESULT {
-    DefWindowProcW(hwnd, msg, w_param, l_param)
+    match msg {
+        windows::Win32::UI::WindowsAndMessaging::WM_ERASEBKGND => LRESULT(1), // Prevent GDI white background flash
+        windows::Win32::UI::WindowsAndMessaging::WM_PAINT => {
+            let mut ps = windows::Win32::Graphics::Gdi::PAINTSTRUCT::default();
+            let _ = windows::Win32::Graphics::Gdi::BeginPaint(hwnd, &mut ps);
+            let _ = windows::Win32::Graphics::Gdi::EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, w_param, l_param),
+    }
 }
 
 impl OverlayWindow {
@@ -108,15 +114,6 @@ impl OverlayWindow {
                 cyBottomHeight: -1,
             };
             let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
-
-            // 2. Enable Windows 11 Native Acrylic Frosted Glass
-            let backdrop_type = DWMSBT_TRANSIENTWINDOW.0 as u32;
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_SYSTEMBACKDROP_TYPE,
-                &backdrop_type as *const _ as *const _,
-                size_of::<u32>() as u32,
-            );
 
             let d2d = D2DContext::new(hwnd, width, height)?;
 
@@ -309,8 +306,28 @@ impl OverlayWindow {
         }
 
         bring_to_front(next_hwnd);
-        nudge_cursor();
+        // Allow target window to composite underneath overlay before hiding (eliminates 10ms white screen)
+        thread::sleep(Duration::from_millis(20));
+        unsafe {
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
         self.hide();
+        nudge_cursor();
+
+        // Trigger background prewarm for follow-up switch
+        let wins = crate::window::get_open_windows(&[], false);
+        let mru = crate::window::sort_by_mru(wins);
+        if mru.len() > 1 {
+            let mut targets = vec![mru[0].hwnd, mru[1].hwnd];
+            if mru.len() > 2 {
+                targets.push(mru[mru.len() - 1].hwnd);
+            }
+            crate::window::capture::prewarm_windows(&targets);
+        }
     }
 
     /// Interactive App Picker Modal with 7 interchangeable layouts & spring physics
@@ -324,7 +341,7 @@ impl OverlayWindow {
         use_ctrl: bool,
         sensitivity: f32,
         event_rx: &Receiver<AppEvent>,
-    ) -> Option<usize> {
+    ) -> Option<(usize, Option<ImageBuffer>, Option<ImageBuffer>)> {
         let n = windows.len();
         if n == 0 {
             return None;
@@ -351,18 +368,42 @@ impl OverlayWindow {
 
         // 2. Concurrently capture thumbnails in parallel (Eliminates all UI lag!)
         let hwnds: Vec<HWND> = windows.iter().map(|w| w.hwnd).collect();
-        let raw_images = capture_windows_parallel(&hwnds);
+        let mut raw_images = capture_windows_parallel(&hwnds);
 
-        let bitmaps: Vec<Option<ID2D1Bitmap>> = raw_images
-            .into_iter()
+        let mut bitmaps: Vec<Option<ID2D1Bitmap>> = raw_images
+            .iter()
             .map(|opt_img| {
-                opt_img.and_then(|img| {
+                opt_img.as_ref().and_then(|img| {
                     self.d2d
                         .create_bitmap_from_rgba(img.width, img.height, &img.pixels)
                         .ok()
                 })
             })
             .collect();
+
+        // Live thumbnail background refresh worker (re-captures every ~500ms while picker is open)
+        let (live_tx, live_rx) = crossbeam_channel::unbounded::<(usize, ImageBuffer)>();
+        let picker_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let bg_active = std::sync::Arc::clone(&picker_active);
+        let bg_hwnds: Vec<usize> = hwnds.iter().map(|h| h.0 as usize).collect();
+
+        thread::spawn(move || {
+            while bg_active.load(std::sync::atomic::Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(500));
+                if !bg_active.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                for (idx, &raw_h) in bg_hwnds.iter().enumerate() {
+                    if !bg_active.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let h = HWND(raw_h as *mut _);
+                    if let Some(img) = crate::window::capture::capture_window_image(h) {
+                        let _ = live_tx.send((idx, img));
+                    }
+                }
+            }
+        });
 
         // 3. Concurrently retrieve window icons
         let icons: Vec<Option<ID2D1Bitmap>> = windows
@@ -409,7 +450,9 @@ impl OverlayWindow {
             let mod_vk = if use_ctrl { VK_CONTROL } else { VK_MENU };
             let is_mod_down = unsafe { (GetAsyncKeyState(mod_vk.0 as i32) as u16 & 0x8000) != 0 };
             if !is_mod_down {
-                return Some(initial);
+                let curr_img = raw_images.get(0).cloned().flatten();
+                let next_img = raw_images.get(initial).cloned().flatten();
+                return Some((initial, curr_img, next_img));
             }
         }
 
@@ -545,6 +588,19 @@ impl OverlayWindow {
             if (mode == PickerMode::Touchpad && fnav_armed) || mode == PickerMode::AltTab {
                 selected = (spring.value.round() as usize).clamp(0, n - 1);
             }
+
+            // Drain fresh live thumbnails from background worker
+            while let Ok((idx, img)) = live_rx.try_recv() {
+                if idx < bitmaps.len() {
+                    if let Ok(new_bmp) = self.d2d.create_bitmap_from_rgba(img.width, img.height, &img.pixels) {
+                        bitmaps[idx] = Some(new_bmp);
+                        if idx < raw_images.len() {
+                            raw_images[idx] = Some(img);
+                        }
+                    }
+                }
+            }
+
             layout.update(spring.value as f32, selected);
 
             // 4. Render 120Hz/144Hz frame with smooth fade-in
@@ -620,9 +676,12 @@ impl OverlayWindow {
             thread::sleep(Duration::from_millis(7)); // 140Hz timing sync
         }
 
+        picker_active.store(false, std::sync::atomic::Ordering::SeqCst);
         self.hide();
         if commit_selection {
-            Some(selected)
+            let curr_img = raw_images.get(0).cloned().flatten();
+            let next_img = raw_images.get(selected).cloned().flatten();
+            Some((selected, curr_img, next_img))
         } else {
             None
         }

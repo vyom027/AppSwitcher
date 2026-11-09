@@ -55,17 +55,17 @@ impl PickerLayout for DockLayout {
             return;
         }
 
-        // ── 1. Vertical Metric Bands (Guarantees zero overlap) ───────────────
-        let base_y = sh - 36.0;
+        // ── 1. Vertical Metric Bands (Maximized Big Theater Preview) ───────────────
+        let base_y = sh - 28.0;
         let max_dock_h = self.card_h * self.mag;
-        let shelf_top = base_y - max_dock_h - 16.0;
-        let title_y = shelf_top - 46.0;
-        let preview_bottom = title_y - 20.0;
-        let top_bound = 64.0; // below top pill badge (16..44)
+        let shelf_top = base_y - max_dock_h - 12.0;
+        let title_y = shelf_top - 38.0;
+        let preview_bottom = title_y - 14.0;
+        let top_bound = 48.0; // cleanly below top pill badge (14..40)
 
-        let available_h = (preview_bottom - top_bound).max(160.0);
+        let available_h = (preview_bottom - top_bound).max(200.0);
 
-        // ── 2. Natural Aspect Ratio of Selected Window ──────────────────────
+        // ── 2. Natural Aspect Ratio of Selected Window (Grand Theater Preview) ─────
         let aspect = if self.selected < bitmaps.len() {
             if let Some(ref bmp) = bitmaps[self.selected] {
                 unsafe {
@@ -83,9 +83,9 @@ impl PickerLayout for DockLayout {
             1.6
         };
 
-        let max_h = available_h.min(sh * 0.48);
-        let max_w = (sw * 0.80).min(max_h * 2.4);
-        let mut pw = max_w.min(max_h * aspect);
+        let max_h = available_h;
+        let max_w = (sw * 0.90).min(max_h * aspect);
+        let mut pw = max_w;
         let mut ph = pw / aspect;
         if ph > max_h {
             ph = max_h;
@@ -168,8 +168,8 @@ impl PickerLayout for DockLayout {
 
         // Subtle Apple-style mirror reflection strictly confined above title
         let refl_top = prev_top + ph + 4.0;
-        let max_refl_h = (title_y - refl_top - 6.0).max(0.0);
-        let refl_h = (ph * 0.20).min(max_refl_h).min(50.0);
+        let max_refl_h = (title_y - refl_top - 4.0).max(0.0);
+        let refl_h = (ph * 0.18).min(max_refl_h).min(45.0);
         if refl_h > 4.0 && self.selected < bitmaps.len() {
             if let Some(ref bmp) = bitmaps[self.selected] {
                 let refl_rect = D2D_RECT_F {
@@ -182,13 +182,7 @@ impl PickerLayout for DockLayout {
             }
         }
 
-        // ── 3. Active Window Title (Centered above the dock shelf) ───────────
-        let title_rect = D2D_RECT_F {
-            left: 40.0,
-            top: title_y,
-            right: sw - 40.0,
-            bottom: title_y + 36.0,
-        };
+        // ── 3. Active Window Title (Refined Liquid Glass Capsule centered above dock) ───────────
         let title = if self.selected < windows.len() {
             let t = &windows[self.selected].title;
             if t.chars().count() > 56 {
@@ -199,6 +193,34 @@ impl PickerLayout for DockLayout {
         } else {
             String::new()
         };
+        let title_w = (title.len() as f32 * 9.5 + 48.0).clamp(240.0, (sw * 0.70).min(650.0));
+        let title_rect = D2D_RECT_F {
+            left: (sw - title_w) * 0.5,
+            top: title_y,
+            right: (sw + title_w) * 0.5,
+            bottom: title_y + 34.0,
+        };
+        d2d.fill_rounded_rect(
+            title_rect,
+            17.0,
+            D2D1_COLOR_F {
+                r: 0.05,
+                g: 0.07,
+                b: 0.10,
+                a: 0.84,
+            },
+        );
+        d2d.draw_rounded_rect(
+            title_rect,
+            17.0,
+            D2D1_COLOR_F {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 0.14,
+            },
+            1.0,
+        );
         d2d.draw_text(
             &title,
             title_rect,
@@ -208,7 +230,7 @@ impl PickerLayout for DockLayout {
                 b: 1.0,
                 a: 1.0,
             },
-            17.5,
+            14.5,
             true,
             true,
         );

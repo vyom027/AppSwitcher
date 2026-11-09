@@ -45,40 +45,74 @@ impl PickerLayout for HeroLayout {
             return;
         }
 
-        let film_y = sh - 36.0 - self.film_h;
-        let preview_h = (film_y - 90.0).clamp(120.0, sh * 0.58);
-        let preview_w = (preview_h * 1.6).min(sw * 0.88);
+        // ── 1. Vertical Metric Bands (Maximized Big Theater Preview) ───────────────
+        let total_film_w = n as f32 * self.film_w + (n as f32 - 1.0) * self.gap;
+        let shelf_w = (total_film_w + 32.0).clamp(240.0, sw - 60.0);
+        let shelf_h = self.film_h + 20.0;
+        let shelf_left = (sw - shelf_w) * 0.5;
+        let shelf_top = sh - 18.0 - shelf_h;
+        let film_y = shelf_top + 10.0;
 
-        // 1. Big Hero Preview
-        let prev_left = (sw - preview_w) * 0.5;
-        let prev_top = 48.0;
+        let title_y = shelf_top - 42.0;
+        let preview_bottom = title_y - 12.0;
+        let top_bound = 48.0;
+        let available_h = (preview_bottom - top_bound).max(180.0);
+
+        let aspect = if self.selected < bitmaps.len() {
+            if let Some(ref bmp) = bitmaps[self.selected] {
+                unsafe {
+                    let sz = bmp.GetSize();
+                    if sz.width > 0.0 && sz.height > 0.0 {
+                        sz.width / sz.height
+                    } else {
+                        1.6
+                    }
+                }
+            } else {
+                1.6
+            }
+        } else {
+            1.6
+        };
+
+        let max_h = available_h;
+        let max_w = (sw * 0.90).min(max_h * aspect);
+        let mut pw = max_w;
+        let mut ph = pw / aspect;
+        if ph > max_h {
+            ph = max_h;
+            pw = ph * aspect;
+        }
+
+        let prev_left = (sw - pw) * 0.5;
+        let prev_top = top_bound + (available_h - ph) * 0.5;
         let prev_rect = D2D_RECT_F {
             left: prev_left,
             top: prev_top,
-            right: prev_left + preview_w,
-            bottom: prev_top + preview_h,
+            right: prev_left + pw,
+            bottom: prev_top + ph,
         };
 
-        d2d.draw_glow(prev_rect, 18.0, accent, 4);
+        d2d.draw_glow(prev_rect, 20.0, accent, 5);
 
         d2d.fill_rounded_rect(
             prev_rect,
-            18.0,
+            20.0,
             D2D1_COLOR_F {
-                r: 0.09,
-                g: 0.11,
-                b: 0.15,
-                a: 0.95,
+                r: 0.08,
+                g: 0.10,
+                b: 0.14,
+                a: 0.96,
             },
         );
 
         if self.selected < bitmaps.len() {
             if let Some(ref bmp) = bitmaps[self.selected] {
-                d2d.fill_rounded_bitmap(bmp, prev_rect, 18.0, 1.0);
+                d2d.fill_rounded_bitmap(bmp, prev_rect, 20.0, 1.0);
             }
         }
 
-        d2d.draw_rounded_rect(prev_rect, 18.0, accent, 2.0);
+        d2d.draw_rounded_rect(prev_rect, 20.0, accent, 2.5);
 
         // Hero App Icon Badge in preview top-left
         if self.selected < icons.len() {
@@ -129,7 +163,7 @@ impl PickerLayout for HeroLayout {
                 active_title.clone()
             };
             let pill_h = 36.0;
-            let pill_y = prev_top + preview_h + 12.0;
+            let pill_y = title_y;
             let pill_w = (title_display.len() as f32 * 8.0 + 70.0).clamp(240.0, 600.0);
             let pill_rect = D2D_RECT_F {
                 left: (sw - pill_w) * 0.5,
@@ -191,6 +225,35 @@ impl PickerLayout for HeroLayout {
                 false,
             );
         }
+
+        // ── 2. Frosted Glass Shelf behind filmstrip ────────────────────────────────
+        let shelf_rect = D2D_RECT_F {
+            left: shelf_left,
+            top: shelf_top,
+            right: shelf_left + shelf_w,
+            bottom: shelf_top + shelf_h,
+        };
+        d2d.fill_rounded_rect(
+            shelf_rect,
+            20.0,
+            D2D1_COLOR_F {
+                r: 0.05,
+                g: 0.07,
+                b: 0.10,
+                a: 0.82,
+            },
+        );
+        d2d.draw_rounded_rect(
+            shelf_rect,
+            20.0,
+            D2D1_COLOR_F {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 0.14,
+            },
+            1.0,
+        );
 
         // 2. Bottom Filmstrip
         let film_stride = self.film_w + self.gap;

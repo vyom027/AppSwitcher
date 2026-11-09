@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::window::foreground::is_own_window;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -41,6 +39,12 @@ pub fn screen_size() -> (i32, i32) {
 }
 
 pub fn work_area() -> (i32, i32, i32, i32) {
+    let (sw, sh) = screen_size();
+    let mut wx = 0;
+    let mut wy = 0;
+    let mut ww = sw;
+    let mut wh = sh;
+
     unsafe {
         let mut rect = RECT::default();
         if SystemParametersInfoW(
@@ -54,12 +58,64 @@ pub fn work_area() -> (i32, i32, i32, i32) {
             let w = rect.right - rect.left;
             let h = rect.bottom - rect.top;
             if w > 0 && h > 0 {
-                return (rect.left, rect.top, w, h);
+                wx = rect.left;
+                wy = rect.top;
+                ww = w;
+                wh = h;
             }
         }
-        let (sw, sh) = screen_size();
-        (0, 0, sw, sh)
+
+        // Dynamic Top-Bar Detection (YASB, Zebar, GlazeWM, RetroBar, etc.):
+        // If SPI_GETWORKAREA did not report a top bar (e.g. YASB with windows_app_bar: false or floating),
+        // inspect visible top-level windows to auto-detect any top bar docked to screen top.
+        if wy == 0 {
+            let mut detected_top_bar_h: i32 = 0;
+
+            unsafe extern "system" fn enum_top_bar_proc(hwnd: HWND, lparam: windows::Win32::Foundation::LPARAM) -> BOOL {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    GetWindowLongW, GetWindowRect, IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+                    WS_EX_TOPMOST,
+                };
+
+                if !IsWindowVisible(hwnd).as_bool() || is_own_window(hwnd) {
+                    return BOOL(1);
+                }
+
+                let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+                let mut wr = RECT::default();
+                if GetWindowRect(hwnd, &mut wr).is_ok() {
+                    let w = wr.right - wr.left;
+                    let h = wr.bottom - wr.top;
+                    let (sw, _) = screen_size();
+
+                    // Check if window is docked to top edge:
+                    // top == 0, spans most of monitor width (>= 75%), and height between 16px and 120px
+                    if wr.top == 0 && wr.left <= 4 && w >= (sw * 3 / 4) && h >= 16 && h <= 120 {
+                        // Priority to topmost or toolwindow
+                        if (ex_style & (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0)) != 0 || h > 20 {
+                            let out_h = lparam.0 as *mut i32;
+                            if !out_h.is_null() && h > *out_h {
+                                *out_h = h;
+                            }
+                        }
+                    }
+                }
+                BOOL(1)
+            }
+
+            let _ = windows::Win32::UI::WindowsAndMessaging::EnumWindows(
+                Some(enum_top_bar_proc),
+                windows::Win32::Foundation::LPARAM(&mut detected_top_bar_h as *mut i32 as isize),
+            );
+
+            if detected_top_bar_h > 0 {
+                wy = detected_top_bar_h;
+                wh = (sh - wy).max(100);
+            }
+        }
     }
+
+    (wx, wy, ww, wh)
 }
 
 // ─── Frosted Glass Backdrop Generator & Cache ────────────────────────────────
@@ -304,9 +360,12 @@ const FRAME_TTL: Duration = Duration::from_millis(2500);
 pub fn prewarm_windows(hwnds: &[HWND]) {
     let list: Vec<usize> = hwnds.iter().map(|h| h.0 as usize).collect();
     thread::spawn(move || {
+        let now = Instant::now();
         for h in list {
             let hwnd = HWND(h as *mut _);
-            let _ = capture_window_image_uncached(hwnd);
+            if let Some(img) = capture_window_image_uncached(hwnd) {
+                FRAME_CACHE.lock().insert(h as isize, (now, img));
+            }
         }
     });
 }
@@ -350,11 +409,46 @@ pub fn capture_window_image(hwnd: HWND) -> Option<ImageBuffer> {
         }
     }
 
-    let img = capture_window_image_uncached(hwnd);
-    if let Some(ref buf) = img {
-        FRAME_CACHE.lock().insert(raw, (now, buf.clone()));
+    // 1. If foreground and not iconic, fast screen DC grab takes < 1ms on calling thread
+    let is_fg = unsafe {
+        GetForegroundWindow() == hwnd && !IsIconic(hwnd).as_bool()
+    };
+    if is_fg {
+        let img = capture_window_image_uncached(hwnd);
+        if let Some(ref buf) = img {
+            FRAME_CACHE.lock().insert(raw, (now, buf.clone()));
+        }
+        return img;
     }
-    img
+
+    // 2. Off-thread capture with strict 120ms timeout to prevent UI hang on unresponsive windows
+    let raw_hwnd = hwnd.0 as usize;
+    let (tx, rx) = crossbeam_channel::bounded::<Option<ImageBuffer>>(1);
+    thread::spawn(move || {
+        let h = HWND(raw_hwnd as *mut _);
+        let res = capture_window_image_uncached(h);
+        let _ = tx.send(res);
+    });
+
+    match rx.recv_timeout(Duration::from_millis(120)) {
+        Ok(Some(buf)) => {
+            FRAME_CACHE.lock().insert(raw, (now, buf.clone()));
+            Some(buf)
+        }
+        Ok(None) => {
+            let title = get_window_title_safe(hwnd);
+            let ph = create_placeholder(&title, 480, 300);
+            FRAME_CACHE.lock().insert(raw, (now, ph.clone()));
+            Some(ph)
+        }
+        Err(_) => {
+            // Window is slow / hung / PrintWindow timed out: return placeholder immediately!
+            let title = get_window_title_safe(hwnd);
+            let ph = create_placeholder(&title, 480, 300);
+            FRAME_CACHE.lock().insert(raw, (now, ph.clone()));
+            Some(ph)
+        }
+    }
 }
 
 fn get_window_title_safe(hwnd: HWND) -> String {
@@ -450,105 +544,88 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
             }
         }
 
-        // 2. PrintWindow (PW_RENDERFULLCONTENT = 2) with hard 120ms timeout to prevent UI freezes
-        if let Some(img) = print_window_with_timeout(hwnd, w, h, Duration::from_millis(120)) {
-            return Some(img);
+        // 2. PrintWindow (PW_RENDERFULLCONTENT = 2)
+        if windows::Win32::UI::WindowsAndMessaging::IsHungAppWindow(hwnd).as_bool() {
+            let title = get_window_title_safe(hwnd);
+            return Some(create_placeholder(&title, w.max(320) as u32, h.max(200) as u32));
+        }
+
+        let hdc_window = GetWindowDC(hwnd);
+        if !hdc_window.0.is_null() {
+            let hdc_mem = CreateCompatibleDC(hdc_window);
+            let hbm = CreateCompatibleBitmap(hdc_window, w, h);
+            let old_obj = SelectObject(hdc_mem, hbm);
+
+            let printed = PrintWindow(hwnd, hdc_mem, 2).as_bool();
+            if printed {
+                let mut bmi = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: w,
+                        biHeight: -h,
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB.0,
+                        biSizeImage: 0,
+                        biXPelsPerMeter: 0,
+                        biYPelsPerMeter: 0,
+                        biClrUsed: 0,
+                        biClrImportant: 0,
+                    },
+                    bmiColors: [windows::Win32::Graphics::Gdi::RGBQUAD::default()],
+                };
+
+                SelectObject(hdc_mem, old_obj);
+
+                let mut raw_pixels = vec![0u8; (w * h * 4) as usize];
+                let lines = GetDIBits(
+                    hdc_mem,
+                    hbm,
+                    0,
+                    h as u32,
+                    Some(raw_pixels.as_mut_ptr() as *mut _),
+                    &mut bmi,
+                    DIB_RGB_COLORS,
+                );
+
+                let _ = DeleteObject(hbm);
+                let _ = DeleteDC(hdc_mem);
+                let _ = ReleaseDC(hwnd, hdc_window);
+
+                if lines > 0 {
+                    // Check if it's completely black
+                    let mut non_black = false;
+                    for chunk in raw_pixels.chunks_exact_mut(4) {
+                        let b = chunk[0];
+                        let g = chunk[1];
+                        let r = chunk[2];
+                        if r > 10 || g > 10 || b > 10 {
+                            non_black = true;
+                        }
+                        chunk[0] = r;
+                        chunk[2] = b;
+                        chunk[3] = 255;
+                    }
+
+                    if non_black {
+                        return Some(ImageBuffer {
+                            width: w as u32,
+                            height: h as u32,
+                            pixels: raw_pixels,
+                        });
+                    }
+                }
+            } else {
+                SelectObject(hdc_mem, old_obj);
+                let _ = DeleteObject(hbm);
+                let _ = DeleteDC(hdc_mem);
+                let _ = ReleaseDC(hwnd, hdc_window);
+            }
         }
 
         let title = get_window_title_safe(hwnd);
         Some(create_placeholder(&title, w.max(320) as u32, h.max(200) as u32))
     }
-}
-
-fn print_window_with_timeout(hwnd: HWND, w: i32, h: i32, timeout: Duration) -> Option<ImageBuffer> {
-    if unsafe { windows::Win32::UI::WindowsAndMessaging::IsHungAppWindow(hwnd).as_bool() } {
-        return None;
-    }
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let hwnd_raw = hwnd.0 as usize;
-
-    thread::spawn(move || unsafe {
-        let hwnd = HWND(hwnd_raw as *mut _);
-        let hdc_window = GetWindowDC(hwnd);
-        if hdc_window.0.is_null() {
-            let _ = tx.send(None);
-            return;
-        }
-
-        let hdc_mem = CreateCompatibleDC(hdc_window);
-        let hbm = CreateCompatibleBitmap(hdc_window, w, h);
-        let old_obj = SelectObject(hdc_mem, hbm);
-
-        let printed = PrintWindow(hwnd, hdc_mem, 2).as_bool();
-        if printed {
-            let mut bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: w,
-                    biHeight: -h,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    biSizeImage: 0,
-                    biXPelsPerMeter: 0,
-                    biYPelsPerMeter: 0,
-                    biClrUsed: 0,
-                    biClrImportant: 0,
-                },
-                bmiColors: [windows::Win32::Graphics::Gdi::RGBQUAD::default()],
-            };
-
-            SelectObject(hdc_mem, old_obj);
-
-            let mut raw_pixels = vec![0u8; (w * h * 4) as usize];
-            let lines = GetDIBits(
-                hdc_mem,
-                hbm,
-                0,
-                h as u32,
-                Some(raw_pixels.as_mut_ptr() as *mut _),
-                &mut bmi,
-                DIB_RGB_COLORS,
-            );
-
-            let _ = DeleteObject(hbm);
-            let _ = DeleteDC(hdc_mem);
-            let _ = ReleaseDC(hwnd, hdc_window);
-
-            if lines > 0 {
-                let mut non_black = false;
-                for chunk in raw_pixels.chunks_exact_mut(4) {
-                    let b = chunk[0];
-                    let g = chunk[1];
-                    let r = chunk[2];
-                    if r > 10 || g > 10 || b > 10 {
-                        non_black = true;
-                    }
-                    chunk[0] = r;
-                    chunk[2] = b;
-                    chunk[3] = 255;
-                }
-
-                if non_black {
-                    let _ = tx.send(Some(ImageBuffer {
-                        width: w as u32,
-                        height: h as u32,
-                        pixels: raw_pixels,
-                    }));
-                    return;
-                }
-            }
-        } else {
-            SelectObject(hdc_mem, old_obj);
-            let _ = DeleteObject(hbm);
-            let _ = DeleteDC(hdc_mem);
-            let _ = ReleaseDC(hwnd, hdc_window);
-        }
-        let _ = tx.send(None);
-    });
-
-    rx.recv_timeout(timeout).unwrap_or(None)
 }
 
 /// Capture multiple windows in parallel using a thread pool

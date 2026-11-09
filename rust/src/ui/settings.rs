@@ -85,8 +85,12 @@ unsafe extern "system" fn settings_wnd_proc(
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
                 let _ = ScreenToClient(hwnd, &mut pt);
-                let x = pt.x as f32;
-                let y = pt.y as f32;
+
+                let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as f32;
+                let scale = dpi / 96.0;
+
+                let x = pt.x as f32 / scale;
+                let y = pt.y as f32 / scale;
 
                 dlg.handle_click(x, y);
                 dlg.render();

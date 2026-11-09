@@ -16,7 +16,7 @@ use std::thread;
 use ui::{OverlayWindow, PickerMode, SettingsDialog, TrayIcon};
 use window::{
     bring_to_front, capture_window_image, create_placeholder, get_open_windows, nudge_cursor,
-    sort_by_mru, start_mru_watcher, enumerator::WindowInfo,
+    sort_by_mru, start_mru_watcher, enumerator::WindowInfo, capture::ImageBuffer,
 };
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, WPARAM, LPARAM};
@@ -92,6 +92,8 @@ fn commit_window_switch(
     settings: &parking_lot::RwLock<Settings>,
     mru: &[WindowInfo],
     sel: usize,
+    opt_curr_img: Option<ImageBuffer>,
+    opt_next_img: Option<ImageBuffer>,
 ) {
     if sel == 0 || sel >= mru.len() {
         bring_to_front(mru[0].hwnd);
@@ -107,11 +109,12 @@ fn commit_window_switch(
     let curr_hwnd = mru[0].hwnd;
     let target_hwnd = mru[sel].hwnd;
 
-    let curr_img = capture_window_image(curr_hwnd);
-    let next_img = capture_window_image(target_hwnd);
+    let curr_img = opt_curr_img.or_else(|| capture_window_image(curr_hwnd));
+    let next_img = opt_next_img.or_else(|| capture_window_image(target_hwnd));
 
     if let (Some(c), Some(n)) = (curr_img, next_img) {
-        overlay.run_switch_transition(1, &c, &n, target_hwnd, anim_kind, duration);
+        let dir = if sel == 1 { 1 } else { -1 };
+        overlay.run_switch_transition(dir, &c, &n, target_hwnd, anim_kind, duration);
     } else {
         bring_to_front(target_hwnd);
         nudge_cursor();
@@ -285,7 +288,7 @@ fn main() {
                                 }
 
                                 if quick_tap {
-                                    commit_window_switch(&overlay, &settings, &mru, start_idx);
+                                    commit_window_switch(&overlay, &settings, &mru, start_idx, None, None);
                                     continue;
                                 }
 
@@ -295,7 +298,7 @@ fn main() {
                                     b: accent_rgb[2] as f32 / 255.0,
                                     a: 1.0,
                                 };
-                                if let Some(sel) = overlay.run_picker(
+                                if let Some((sel, c_img, n_img)) = overlay.run_picker(
                                     &mru,
                                     start_idx,
                                     &layout_name,
@@ -305,7 +308,7 @@ fn main() {
                                     sensitivity,
                                     &event_rx,
                                 ) {
-                                    commit_window_switch(&overlay, &settings, &mru, sel);
+                                    commit_window_switch(&overlay, &settings, &mru, sel, c_img, n_img);
                                 }
                             }
                         }
@@ -328,7 +331,7 @@ fn main() {
                                     b: accent_rgb[2] as f32 / 255.0,
                                     a: 1.0,
                                 };
-                                if let Some(sel) = overlay.run_picker(
+                                if let Some((sel, c_img, n_img)) = overlay.run_picker(
                                     &mru,
                                     0,
                                     &layout_name,
@@ -338,7 +341,7 @@ fn main() {
                                     sensitivity,
                                     &event_rx,
                                 ) {
-                                    commit_window_switch(&overlay, &settings, &mru, sel);
+                                    commit_window_switch(&overlay, &settings, &mru, sel, c_img, n_img);
                                 }
                             }
                         }

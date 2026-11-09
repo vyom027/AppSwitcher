@@ -4,7 +4,6 @@ use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 
 pub struct DuoFoldTransition {
     pub direction: i32,
-    pub eye_depth: f32,
     pub max_bend_current: f32,
     pub max_bend_next: f32,
 }
@@ -13,9 +12,8 @@ impl Default for DuoFoldTransition {
     fn default() -> Self {
         Self {
             direction: 1,
-            eye_depth: 1.45,
             max_bend_current: 78.0f32.to_radians(),
-            max_bend_next: 24.0f32.to_radians(),
+            max_bend_next: 26.0f32.to_radians(),
         }
     }
 }
@@ -42,7 +40,7 @@ impl DuoFoldTransition {
         let curr_hinge_left = self.direction > 0;
         let next_hinge_left = self.direction <= 0;
 
-        // 1. Subtle obsidian void shadow over frosted backdrop behind folding panels
+        // 1. Deep modern obsidian void backdrop behind folding panels
         d2d.fill_rounded_rect(
             D2D_RECT_F {
                 left: 0.0,
@@ -55,14 +53,13 @@ impl DuoFoldTransition {
                 r: 0.02,
                 g: 0.03,
                 b: 0.05,
-                a: 0.45 * t,
+                a: 1.0,
             },
         );
 
-        let aspect = sw / sh.max(1.0);
-        let eye = self.eye_depth * aspect.max(1.0);
+        let eye_distance = 1.45 * sw.max(sh);
 
-        // 2. Next panel unfolds forward around its hinge
+        // 2. Next panel unfolds forward around its hinge from the deep void
         let bend_n = (1.0 - t) * self.max_bend_next;
         let op_n = 0.50 + 0.50 * t;
         self.render_3d_panel(
@@ -71,13 +68,12 @@ impl DuoFoldTransition {
             next_hinge_left,
             bend_n,
             op_n,
-            eye,
-            aspect,
+            eye_distance,
             sw,
             sh,
         );
 
-        // 3. Current panel folds away around its hinge into void
+        // 3. Current panel folds away around its hinge into the void
         let bend_c = t * self.max_bend_current;
         let op_c = if t > 0.55 {
             (1.0 - (t - 0.55) / 0.45).max(0.0)
@@ -92,8 +88,7 @@ impl DuoFoldTransition {
                 curr_hinge_left,
                 bend_c,
                 op_c,
-                eye,
-                aspect,
+                eye_distance,
                 sw,
                 sh,
             );
@@ -108,7 +103,6 @@ impl DuoFoldTransition {
         bend: f32,
         opacity: f32,
         eye: f32,
-        aspect: f32,
         sw: f32,
         sh: f32,
     ) {
@@ -121,36 +115,47 @@ impl DuoFoldTransition {
         let sine = bend.sin();
 
         let hinge_x = if hinge_left { 0.0 } else { sw };
-        let far_x = if hinge_left { sw } else { 0.0 };
         let cy = sh * 0.5;
 
-        let strips = 72;
+        let strips = 96;
         let inv_strips = 1.0 / strips as f32;
 
         for i in 0..strips {
             let u0 = i as f32 * inv_strips;
             let u1 = (i + 1) as f32 * inv_strips;
 
-            // Distance from hinge in [0, 1]
+            // Normalized distance from hinge [0, 1]
             let fh0 = if hinge_left { u0 } else { 1.0 - u0 };
             let fh1 = if hinge_left { u1 } else { 1.0 - u1 };
             let fh_avg = (fh0 + fh1) * 0.5;
 
-            let d0 = 1.35 * aspect * sine * fh0;
-            let d1 = 1.35 * aspect * sine * fh1;
+            // True projective perspective depth
+            let depth_z0 = fh0 * sw * sine;
+            let depth_z1 = fh1 * sw * sine;
 
-            let p0 = eye / (eye + d0);
-            let p1 = eye / (eye + d1);
+            let p0 = eye / (eye + depth_z0);
+            let p1 = eye / (eye + depth_z1);
 
-            let x0 = hinge_x + (far_x - hinge_x) * fh0 * cosine * p0;
-            let x1 = hinge_x + (far_x - hinge_x) * fh1 * cosine * p1;
+            let x_disp0 = fh0 * sw * cosine * p0;
+            let x_disp1 = fh1 * sw * cosine * p1;
+
+            let x0 = if hinge_left {
+                hinge_x + x_disp0
+            } else {
+                hinge_x - x_disp0
+            };
+            let x1 = if hinge_left {
+                hinge_x + x_disp1
+            } else {
+                hinge_x - x_disp1
+            };
 
             let h0 = cy * p0;
             let h1 = cy * p1;
             let h_avg = (h0 + h1) * 0.5;
 
             let left = x0.min(x1);
-            let right = x0.max(x1) + 0.6; // Slight overlap prevents subpixel rendering seam
+            let right = x0.max(x1) + 0.6; // Slight subpixel overlap prevents seam
             let top = cy - h_avg;
             let bottom = cy + h_avg;
 
@@ -172,7 +177,7 @@ impl DuoFoldTransition {
 
             // 2. Liquid Glass Deep Void Occlusion Shading
             let dark_fade = ((fh_avg - 0.22) / 0.78).clamp(0.0, 1.0);
-            let dark_alpha = (0.88 * dark_fade.powf(1.4) * sine * opacity).clamp(0.0, 1.0);
+            let dark_alpha = (0.90 * dark_fade.powf(1.4) * sine * opacity).clamp(0.0, 1.0);
             if dark_alpha > 0.005 {
                 d2d.fill_rounded_rect(
                     dst_rect,
@@ -188,7 +193,7 @@ impl DuoFoldTransition {
 
             // 3. Liquid Glass Gaussian Specular Reflection Glint
             let refl = (-((fh_avg - 0.68) / 0.18).powi(2)).exp();
-            let glass_alpha = (0.28 * refl * (1.0 - bend / 1.45) * opacity).clamp(0.0, 1.0);
+            let glass_alpha = (0.30 * refl * (1.0 - bend / 1.5) * opacity).clamp(0.0, 1.0);
             if glass_alpha > 0.005 {
                 d2d.fill_rounded_rect(
                     dst_rect,
@@ -203,7 +208,7 @@ impl DuoFoldTransition {
             }
 
             // 4. Subtle Hinge Edge Drop Shadow
-            let hinge_shadow = ((1.0 - fh_avg / 0.20).clamp(0.0, 1.0) * sine * 0.32 * opacity).clamp(0.0, 1.0);
+            let hinge_shadow = ((1.0 - fh_avg / 0.22).clamp(0.0, 1.0) * sine * 0.35 * opacity).clamp(0.0, 1.0);
             if hinge_shadow > 0.005 {
                 d2d.fill_rounded_rect(
                     dst_rect,

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::event::{AppEvent, WM_APP_EVENT};
 use crate::input::gesture_tracker::GestureTracker;
 use crate::input::hid_parser::{DeviceLayout, UP_DIGITIZER, U_TOUCHPAD};
@@ -24,6 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct LiveFingerState {
     pub count: usize,
     pub avg_x: f64,
@@ -193,6 +192,16 @@ pub fn run_input_thread(
 
     let on_arm = || {
         crate::window::capture::prewarm_backdrop();
+        let wins = crate::window::get_open_windows(&[], false);
+        let mru = crate::window::sort_by_mru(wins);
+        if !mru.is_empty() {
+            let mut targets = vec![mru[0].hwnd];
+            if mru.len() > 1 {
+                targets.push(mru[1].hwnd);
+                targets.push(mru[mru.len() - 1].hwnd);
+            }
+            crate::window::capture::prewarm_windows(&targets);
+        }
     };
 
     *TRACKER.lock() = Some(GestureTracker::new(
