@@ -32,6 +32,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage, TranslateMessage, MSG,
 };
 
+static IS_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 const MUTEX_NAME: PCWSTR = w!("AppSwitcher_Rust_Running_Mutex");
 const SHOW_SETTINGS_EVENT: PCWSTR = w!("AppSwitcher_Rust_ShowSettings_Event");
 const PY_MUTEX_NAME: PCWSTR = w!("AppSwitcher_Running_Mutex");
@@ -145,7 +147,11 @@ fn main() {
         }
     };
 
-    let settings_dialog = match SettingsDialog::new(Arc::clone(&settings)) {
+    let settings_dialog = match SettingsDialog::new(
+        Arc::clone(&settings),
+        event_tx.clone(),
+        overlay.hwnd.0 as usize,
+    ) {
         Ok(dlg) => dlg,
         Err(e) => {
             eprintln!("[fatal] Settings dialog initialization failed: {:?}", e);
@@ -268,6 +274,9 @@ fn main() {
                             }
                         }
                         AppEvent::Swipe(direction) => {
+                            if IS_BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                                continue;
+                            }
                             let (blocklist, anim_name, duration) = {
                                 let cfg = settings.read();
                                 (cfg.blocklist.clone(), cfg.animation.clone(), cfg.duration as f32)
@@ -296,6 +305,9 @@ fn main() {
                                     nudge_cursor();
                                 }
                             }
+                            // Drain any excess swipe events that arrived during animation
+                            while let Ok(AppEvent::Swipe(_)) = event_rx.try_recv() {}
+                            IS_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
                         }
                         AppEvent::Pinch => {
                             let cfg = settings.read();

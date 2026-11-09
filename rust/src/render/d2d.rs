@@ -51,6 +51,7 @@ impl D2DContext {
 
             let target = factory.CreateHwndRenderTarget(&rt_props, &hwnd_props)?;
             target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            target.SetDpi(96.0, 96.0);
             let rt: ID2D1RenderTarget = target.cast()?;
 
             let brush = rt.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None)?;

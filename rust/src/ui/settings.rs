@@ -1,5 +1,7 @@
 use crate::config::Settings;
+use crate::event::{AppEvent, WM_APP_EVENT};
 use crate::render::d2d::D2DContext;
+use crossbeam_channel::Sender;
 use std::mem::size_of;
 use std::sync::Arc;
 use windows::core::w;
@@ -8,9 +10,9 @@ use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, RegisterClassExW, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, GWLP_USERDATA, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW,
-    WINDOW_EX_STYLE, WM_CLOSE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_PAINT,
+    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, PostMessageW, RegisterClassExW,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE,
+    SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_PAINT,
     WNDCLASSEXW, WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
 };
 
@@ -20,11 +22,37 @@ pub struct SettingsDialog {
     pub height: u32,
     pub d2d: D2DContext,
     pub settings: Arc<parking_lot::RwLock<Settings>>,
+    pub event_tx: Sender<AppEvent>,
+    pub main_hwnd: usize,
     pub active_tab: usize,
+    pub status_msg: String,
 }
 
 unsafe impl Send for SettingsDialog {}
 unsafe impl Sync for SettingsDialog {}
+
+const ACCENT_PRESETS: &[(&str, [u8; 3])] = &[
+    ("Cyber Blue", [0, 150, 255]),
+    ("Apple Purple", [165, 95, 255]),
+    ("Emerald Mint", [0, 215, 160]),
+    ("Sunset Orange", [255, 120, 50]),
+    ("Electric Coral", [255, 75, 130]),
+    ("Golden Sun", [255, 195, 30]),
+    ("Ice Silver", [210, 225, 250]),
+    ("Neon Violet", [195, 70, 255]),
+];
+
+const LAYOUT_NAMES: &[(&str, &str)] = &[
+    ("dock", "macOS-style Magnified Dock + Large Preview"),
+    ("row", "Smooth Centered Horizontal Carousel"),
+    ("grid", "2D Responsive Window Matrix"),
+    ("coverflow", "3D Angled Perspective Shelf"),
+    ("hero", "Big Stage with Bottom Filmstrip"),
+    ("wallet", "Vertical Overlapping Card Deck"),
+    ("fan", "Curved Radial Card Arc"),
+];
+
+const ANIM_NAMES: &[&str] = &["slide", "duo_fold", "fade", "zoom", "cube", "flip"];
 
 unsafe extern "system" fn settings_wnd_proc(
     hwnd: HWND,
@@ -50,27 +78,8 @@ unsafe extern "system" fn settings_wnd_proc(
                 let x = (l_param.0 & 0xFFFF) as i16 as f32;
                 let y = ((l_param.0 >> 16) & 0xFFFF) as i16 as f32;
 
-                // Sidebar tab clicks
-                if x < 210.0 && y >= 60.0 {
-                    let tab = ((y - 60.0) / 46.0) as usize;
-                    if tab < 5 && tab != dlg.active_tab {
-                        dlg.active_tab = tab;
-                        let _ = InvalidateRect(hwnd, None, false);
-                    }
-                }
-
-                // Save button click
-                let save_left = dlg.width as f32 - 160.0;
-                let save_top = dlg.height as f32 - 58.0;
-                if x >= save_left && y >= save_top {
-                    let cfg = dlg.settings.read().clone();
-                    if let Err(e) = cfg.save() {
-                        eprintln!("[settings] save error: {:?}", e);
-                    } else {
-                        println!("[settings] saved configuration to disk.");
-                    }
-                }
-
+                dlg.handle_click(x, y);
+                let _ = InvalidateRect(hwnd, None, false);
                 return LRESULT(0);
             }
             WM_CLOSE => {
@@ -84,9 +93,13 @@ unsafe extern "system" fn settings_wnd_proc(
 }
 
 impl SettingsDialog {
-    pub fn new(settings: Arc<parking_lot::RwLock<Settings>>) -> Result<Box<Self>, windows::core::Error> {
-        let width = 840;
-        let height = 560;
+    pub fn new(
+        settings: Arc<parking_lot::RwLock<Settings>>,
+        event_tx: Sender<AppEvent>,
+        main_hwnd: usize,
+    ) -> Result<Box<Self>, windows::core::Error> {
+        let width = 860;
+        let height = 580;
 
         unsafe {
             let h_instance = GetModuleHandleW(None)?;
@@ -105,10 +118,10 @@ impl SettingsDialog {
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 class_name,
-                w!("AppSwitcher — Modern Settings (Native)"),
+                w!("AppSwitcher — Modern Settings"),
                 style,
-                100,
-                100,
+                120,
+                120,
                 width as i32,
                 height as i32,
                 HWND(std::ptr::null_mut()),
@@ -125,7 +138,10 @@ impl SettingsDialog {
                 height,
                 d2d,
                 settings,
+                event_tx,
+                main_hwnd,
                 active_tab: 0,
+                status_msg: String::new(),
             });
 
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, dlg.as_mut() as *mut _ as isize);
@@ -143,10 +159,123 @@ impl SettingsDialog {
         self.render();
     }
 
+    fn handle_click(&mut self, x: f32, y: f32) {
+        // 1. Sidebar tab clicks
+        if x < 210.0 && y >= 60.0 {
+            let tab = ((y - 60.0) / 48.0) as usize;
+            if tab < 5 {
+                self.active_tab = tab;
+                self.status_msg.clear();
+            }
+            return;
+        }
+
+        // Bottom Action Buttons
+        let btn_y = self.height as f32 - 56.0;
+
+        // Preview button: x 460..580
+        if y >= btn_y && y <= btn_y + 36.0 && x >= 460.0 && x <= 580.0 {
+            if self.active_tab == 0 {
+                let _ = self.event_tx.send(AppEvent::Swipe(1));
+            } else {
+                let _ = self.event_tx.send(AppEvent::AltTab { direction: 1 });
+            }
+            unsafe {
+                let _ = PostMessageW(
+                    HWND(self.main_hwnd as *mut _),
+                    WM_APP_EVENT,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+            return;
+        }
+
+        // Save button: x >= width - 150
+        if y >= btn_y && y <= btn_y + 36.0 && x >= self.width as f32 - 150.0 {
+            let cfg = self.settings.read().clone();
+            if cfg.save().is_ok() {
+                self.status_msg = "Saved successfully!".to_string();
+            } else {
+                self.status_msg = "Error saving settings.".to_string();
+            }
+            return;
+        }
+
+        // Tab-specific interactions inside the right card
+        match self.active_tab {
+            0 => {
+                // Motion & Speed Tab:
+                // Animation selection: row of pills at y = 140..175
+                if y >= 140.0 && y <= 175.0 && x >= 250.0 {
+                    let col = ((x - 250.0) / 95.0) as usize;
+                    if col < ANIM_NAMES.len() {
+                        self.settings.write().animation = ANIM_NAMES[col].to_string();
+                        let _ = self.settings.read().save();
+                    }
+                }
+                // Duration presets: y = 230..265
+                if y >= 230.0 && y <= 265.0 && x >= 250.0 {
+                    let presets = [0.14, 0.22, 0.32, 0.45];
+                    let col = ((x - 250.0) / 125.0) as usize;
+                    if col < presets.len() {
+                        self.settings.write().duration = presets[col];
+                        let _ = self.settings.read().save();
+                    }
+                }
+                // Sensitivity presets: y = 320..355
+                if y >= 320.0 && y <= 355.0 && x >= 250.0 {
+                    let sens = [160, 220, 300];
+                    let col = ((x - 250.0) / 135.0) as usize;
+                    if col < sens.len() {
+                        self.settings.write().sensitivity = sens[col];
+                        let _ = self.settings.read().save();
+                    }
+                }
+            }
+            1 => {
+                // Layouts Tab: 7 cards in 2 columns
+                if x >= 250.0 && x <= 790.0 && y >= 130.0 {
+                    let row = ((y - 130.0) / 52.0) as usize;
+                    if row < LAYOUT_NAMES.len() {
+                        self.settings.write().layout = LAYOUT_NAMES[row].0.to_string();
+                        let _ = self.settings.read().save();
+                    }
+                }
+            }
+            2 => {
+                // Hotkeys Tab:
+                // Alt vs Ctrl toggle: y = 150..185
+                if y >= 150.0 && y <= 185.0 && x >= 250.0 && x <= 460.0 {
+                    let is_ctrl = x >= 355.0;
+                    self.settings.write().hotkey_mod = if is_ctrl { "ctrl".to_string() } else { "alt".to_string() };
+                    let _ = self.settings.read().save();
+                }
+                // Pinch toggle: y = 240..275
+                if y >= 240.0 && y <= 275.0 && x >= 250.0 && x <= 420.0 {
+                    let cur = self.settings.read().pinch_enabled;
+                    self.settings.write().pinch_enabled = !cur;
+                    let _ = self.settings.read().save();
+                }
+            }
+            3 => {
+                // Appearance Tab: 8 Accent Color Circles at y = 160..210
+                if y >= 150.0 && y <= 210.0 && x >= 250.0 {
+                    let idx = ((x - 250.0) / 65.0) as usize;
+                    if idx < ACCENT_PRESETS.len() {
+                        self.settings.write().accent = ACCENT_PRESETS[idx].1;
+                        let _ = self.settings.read().save();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn render(&self) {
         self.d2d.begin_draw();
-        // Dark glass background (#14161F)
-        self.d2d.clear(0.08, 0.09, 0.12, 1.0);
+        // Deep modern dark background (#0f1118)
+        self.d2d.clear(0.06, 0.07, 0.09, 1.0);
 
         let cfg = self.settings.read();
         let accent = D2D1_COLOR_F {
@@ -167,21 +296,42 @@ impl SettingsDialog {
             sidebar_rect,
             0.0,
             D2D1_COLOR_F {
-                r: 0.06,
-                g: 0.07,
-                b: 0.09,
+                r: 0.05,
+                g: 0.06,
+                b: 0.08,
                 a: 1.0,
             },
         );
 
+        // App Logo / Title
+        let logo_rect = D2D_RECT_F {
+            left: 20.0,
+            top: 20.0,
+            right: 200.0,
+            bottom: 48.0,
+        };
+        self.d2d.draw_text(
+            "AppSwitcher 2.0",
+            logo_rect,
+            D2D1_COLOR_F {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            16.0,
+            true,
+            false,
+        );
+
         let tabs = ["Motion & Speed", "Layouts", "Hotkeys", "Appearance", "Windows"];
         for (i, &name) in tabs.iter().enumerate() {
-            let tab_y = 60.0 + i as f32 * 46.0;
+            let tab_y = 60.0 + i as f32 * 48.0;
             let tab_rect = D2D_RECT_F {
-                left: 16.0,
+                left: 14.0,
                 top: tab_y,
-                right: 194.0,
-                bottom: tab_y + 38.0,
+                right: 196.0,
+                bottom: tab_y + 40.0,
             };
 
             if i == self.active_tab {
@@ -190,12 +340,12 @@ impl SettingsDialog {
                     name,
                     tab_rect,
                     D2D1_COLOR_F {
-                        r: 0.05,
-                        g: 0.07,
-                        b: 0.1,
+                        r: 0.04,
+                        g: 0.05,
+                        b: 0.07,
                         a: 1.0,
                     },
-                    14.0,
+                    13.5,
                     true,
                     true,
                 );
@@ -204,12 +354,12 @@ impl SettingsDialog {
                     name,
                     tab_rect,
                     D2D1_COLOR_F {
-                        r: 0.7,
+                        r: 0.70,
                         g: 0.75,
                         b: 0.85,
                         a: 1.0,
                     },
-                    14.0,
+                    13.5,
                     false,
                     true,
                 );
@@ -219,23 +369,23 @@ impl SettingsDialog {
         // 2. Main Content Card (Right pane)
         let content_rect = D2D_RECT_F {
             left: 230.0,
-            top: 24.0,
-            right: self.width as f32 - 24.0,
-            bottom: self.height as f32 - 70.0,
+            top: 20.0,
+            right: self.width as f32 - 20.0,
+            bottom: self.height as f32 - 68.0,
         };
         self.d2d.fill_rounded_rect(
             content_rect,
-            18.0,
+            16.0,
             D2D1_COLOR_F {
-                r: 0.1,
-                g: 0.12,
-                b: 0.16,
-                a: 0.85,
+                r: 0.08,
+                g: 0.10,
+                b: 0.13,
+                a: 0.90,
             },
         );
         self.d2d.draw_rounded_rect(
             content_rect,
-            18.0,
+            16.0,
             D2D1_COLOR_F {
                 r: 1.0,
                 g: 1.0,
@@ -248,101 +398,473 @@ impl SettingsDialog {
         // Header
         let header_rect = D2D_RECT_F {
             left: 254.0,
-            top: 48.0,
+            top: 38.0,
             right: 700.0,
-            bottom: 80.0,
+            bottom: 68.0,
         };
         self.d2d.draw_text(
             tabs[self.active_tab],
             header_rect,
             D2D1_COLOR_F {
-                r: 0.95,
-                g: 0.96,
-                b: 0.98,
+                r: 0.96,
+                g: 0.97,
+                b: 1.0,
                 a: 1.0,
             },
-            22.0,
+            20.0,
             true,
             false,
         );
 
-        // Subtitle / Info
-        let sub_rect = D2D_RECT_F {
-            left: 254.0,
-            top: 86.0,
-            right: 760.0,
-            bottom: 120.0,
-        };
-        let sub_text = match self.active_tab {
-            0 => "Configure gesture sensitivity, 120Hz/144Hz animation transitions, and spring physics.",
-            1 => "Select your interactive window picker presentation (Dock, Grid, Coverflow, Row, Hero, Wallet, Fan).",
-            2 => "Configure the keyboard shortcut trigger (Default: Alt + Tab or Ctrl + Tab).",
-            3 => "Customize dark glass styling, accent color, and blur radius.",
-            _ => "Exclude specific applications or window titles from the switcher.",
-        };
-        self.d2d.draw_text(
-            sub_text,
-            sub_rect,
-            D2D1_COLOR_F {
-                r: 0.65,
-                g: 0.70,
-                b: 0.80,
-                a: 0.9,
-            },
-            13.0,
-            false,
-            false,
-        );
-
         // Tab Content
-        let val_rect = D2D_RECT_F {
-            left: 254.0,
-            top: 140.0,
-            right: 760.0,
-            bottom: 300.0,
+        match self.active_tab {
+            0 => {
+                // Section: Switch Animation
+                self.d2d.draw_text(
+                    "Switch Transition Animation",
+                    D2D_RECT_F {
+                        left: 254.0,
+                        top: 110.0,
+                        right: 700.0,
+                        bottom: 135.0,
+                    },
+                    D2D1_COLOR_F { r: 0.85, g: 0.88, b: 0.95, a: 1.0 },
+                    14.0,
+                    true,
+                    false,
+                );
+
+                for (col, &anim) in ANIM_NAMES.iter().enumerate() {
+                    let ax = 250.0 + col as f32 * 95.0;
+                    let pill_rect = D2D_RECT_F {
+                        left: ax,
+                        top: 140.0,
+                        right: ax + 88.0,
+                        bottom: 175.0,
+                    };
+                    let is_sel = cfg.animation.eq_ignore_ascii_case(anim);
+                    if is_sel {
+                        self.d2d.fill_rounded_rect(pill_rect, 8.0, accent);
+                        self.d2d.draw_text(
+                            anim,
+                            pill_rect,
+                            D2D1_COLOR_F { r: 0.04, g: 0.05, b: 0.07, a: 1.0 },
+                            13.0,
+                            true,
+                            true,
+                        );
+                    } else {
+                        self.d2d.fill_rounded_rect(
+                            pill_rect,
+                            8.0,
+                            D2D1_COLOR_F { r: 0.12, g: 0.14, b: 0.18, a: 0.8 },
+                        );
+                        self.d2d.draw_text(
+                            anim,
+                            pill_rect,
+                            D2D1_COLOR_F { r: 0.75, g: 0.80, b: 0.90, a: 1.0 },
+                            13.0,
+                            false,
+                            true,
+                        );
+                    }
+                }
+
+                // Section: Duration
+                self.d2d.draw_text(
+                    "Transition Speed",
+                    D2D_RECT_F {
+                        left: 254.0,
+                        top: 200.0,
+                        right: 700.0,
+                        bottom: 225.0,
+                    },
+                    D2D1_COLOR_F { r: 0.85, g: 0.88, b: 0.95, a: 1.0 },
+                    14.0,
+                    true,
+                    false,
+                );
+
+                let dur_presets = [("Snappy (140ms)", 0.14), ("Balanced (220ms)", 0.22), ("Smooth (320ms)", 0.32), ("Cinematic (450ms)", 0.45)];
+                for (col, &(label, val)) in dur_presets.iter().enumerate() {
+                    let dx = 250.0 + col as f32 * 125.0;
+                    let rect = D2D_RECT_F {
+                        left: dx,
+                        top: 230.0,
+                        right: dx + 118.0,
+                        bottom: 265.0,
+                    };
+                    let is_sel = (cfg.duration - val).abs() < 0.03;
+                    if is_sel {
+                        self.d2d.fill_rounded_rect(rect, 8.0, accent);
+                        self.d2d.draw_text(
+                            label,
+                            rect,
+                            D2D1_COLOR_F { r: 0.04, g: 0.05, b: 0.07, a: 1.0 },
+                            11.5,
+                            true,
+                            true,
+                        );
+                    } else {
+                        self.d2d.fill_rounded_rect(
+                            rect,
+                            8.0,
+                            D2D1_COLOR_F { r: 0.12, g: 0.14, b: 0.18, a: 0.8 },
+                        );
+                        self.d2d.draw_text(
+                            label,
+                            rect,
+                            D2D1_COLOR_F { r: 0.75, g: 0.80, b: 0.90, a: 1.0 },
+                            11.5,
+                            false,
+                            true,
+                        );
+                    }
+                }
+
+                // Section: Sensitivity
+                self.d2d.draw_text(
+                    "Touchpad Glide Sensitivity",
+                    D2D_RECT_F {
+                        left: 254.0,
+                        top: 290.0,
+                        right: 700.0,
+                        bottom: 315.0,
+                    },
+                    D2D1_COLOR_F { r: 0.85, g: 0.88, b: 0.95, a: 1.0 },
+                    14.0,
+                    true,
+                    false,
+                );
+
+                let sens_presets = [("High (160)", 160), ("Balanced (220)", 220), ("Relaxed (300)", 300)];
+                for (col, &(label, val)) in sens_presets.iter().enumerate() {
+                    let sx = 250.0 + col as f32 * 135.0;
+                    let rect = D2D_RECT_F {
+                        left: sx,
+                        top: 320.0,
+                        right: sx + 125.0,
+                        bottom: 355.0,
+                    };
+                    let is_sel = cfg.sensitivity == val;
+                    if is_sel {
+                        self.d2d.fill_rounded_rect(rect, 8.0, accent);
+                        self.d2d.draw_text(
+                            label,
+                            rect,
+                            D2D1_COLOR_F { r: 0.04, g: 0.05, b: 0.07, a: 1.0 },
+                            12.0,
+                            true,
+                            true,
+                        );
+                    } else {
+                        self.d2d.fill_rounded_rect(
+                            rect,
+                            8.0,
+                            D2D1_COLOR_F { r: 0.12, g: 0.14, b: 0.18, a: 0.8 },
+                        );
+                        self.d2d.draw_text(
+                            label,
+                            rect,
+                            D2D1_COLOR_F { r: 0.75, g: 0.80, b: 0.90, a: 1.0 },
+                            12.0,
+                            false,
+                            true,
+                        );
+                    }
+                }
+            }
+            1 => {
+                // Layouts Tab: 7 selectable layout cards
+                self.d2d.draw_text(
+                    "Click a layout to set as active window picker presentation:",
+                    D2D_RECT_F {
+                        left: 254.0,
+                        top: 85.0,
+                        right: 780.0,
+                        bottom: 115.0,
+                    },
+                    D2D1_COLOR_F { r: 0.70, g: 0.75, b: 0.85, a: 1.0 },
+                    13.0,
+                    false,
+                    false,
+                );
+
+                for (i, &(name, desc)) in LAYOUT_NAMES.iter().enumerate() {
+                    let y = 130.0 + i as f32 * 52.0;
+                    let card_rect = D2D_RECT_F {
+                        left: 250.0,
+                        top: y,
+                        right: 800.0,
+                        bottom: y + 44.0,
+                    };
+                    let is_sel = cfg.layout.eq_ignore_ascii_case(name);
+
+                    if is_sel {
+                        self.d2d.fill_rounded_rect(
+                            card_rect,
+                            8.0,
+                            D2D1_COLOR_F {
+                                r: accent.r * 0.25,
+                                g: accent.g * 0.25,
+                                b: accent.b * 0.25,
+                                a: 0.8,
+                            },
+                        );
+                        self.d2d.draw_rounded_rect(card_rect, 8.0, accent, 2.0);
+                    } else {
+                        self.d2d.fill_rounded_rect(
+                            card_rect,
+                            8.0,
+                            D2D1_COLOR_F { r: 0.11, g: 0.13, b: 0.17, a: 0.7 },
+                        );
+                        self.d2d.draw_rounded_rect(
+                            card_rect,
+                            8.0,
+                            D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.08 },
+                            1.0,
+                        );
+                    }
+
+                    // Layout Name
+                    self.d2d.draw_text(
+                        &name.to_uppercase(),
+                        D2D_RECT_F {
+                            left: 266.0,
+                            top: y + 12.0,
+                            right: 370.0,
+                            bottom: y + 36.0,
+                        },
+                        if is_sel { accent } else { D2D1_COLOR_F { r: 0.9, g: 0.9, b: 0.95, a: 1.0 } },
+                        14.0,
+                        true,
+                        false,
+                    );
+
+                    // Layout Description
+                    self.d2d.draw_text(
+                        desc,
+                        D2D_RECT_F {
+                            left: 380.0,
+                            top: y + 14.0,
+                            right: 790.0,
+                            bottom: y + 36.0,
+                        },
+                        D2D1_COLOR_F { r: 0.65, g: 0.70, b: 0.80, a: 1.0 },
+                        12.5,
+                        false,
+                        false,
+                    );
+                }
+            }
+            2 => {
+                // Hotkeys Tab
+                self.d2d.draw_text(
+                    "Keyboard Switcher Trigger Chord",
+                    D2D_RECT_F { left: 254.0, top: 110.0, right: 700.0, bottom: 135.0 },
+                    D2D1_COLOR_F { r: 0.85, g: 0.88, b: 0.95, a: 1.0 },
+                    14.0,
+                    true,
+                    false,
+                );
+
+                let is_ctrl = cfg.hotkey_mod.eq_ignore_ascii_case("ctrl");
+                let alt_rect = D2D_RECT_F { left: 250.0, top: 150.0, right: 345.0, bottom: 185.0 };
+                let ctrl_rect = D2D_RECT_F { left: 355.0, top: 150.0, right: 450.0, bottom: 185.0 };
+
+                if !is_ctrl {
+                    self.d2d.fill_rounded_rect(alt_rect, 8.0, accent);
+                    self.d2d.draw_text("Alt + Tab", alt_rect, D2D1_COLOR_F { r: 0.04, g: 0.05, b: 0.07, a: 1.0 }, 13.0, true, true);
+                    self.d2d.fill_rounded_rect(ctrl_rect, 8.0, D2D1_COLOR_F { r: 0.12, g: 0.14, b: 0.18, a: 0.8 });
+                    self.d2d.draw_text("Ctrl + Tab", ctrl_rect, D2D1_COLOR_F { r: 0.7, g: 0.75, b: 0.85, a: 1.0 }, 13.0, false, true);
+                } else {
+                    self.d2d.fill_rounded_rect(alt_rect, 8.0, D2D1_COLOR_F { r: 0.12, g: 0.14, b: 0.18, a: 0.8 });
+                    self.d2d.draw_text("Alt + Tab", alt_rect, D2D1_COLOR_F { r: 0.7, g: 0.75, b: 0.85, a: 1.0 }, 13.0, false, true);
+                    self.d2d.fill_rounded_rect(ctrl_rect, 8.0, accent);
+                    self.d2d.draw_text("Ctrl + Tab", ctrl_rect, D2D1_COLOR_F { r: 0.04, g: 0.05, b: 0.07, a: 1.0 }, 13.0, true, true);
+                }
+
+                // 3-Finger Pinch
+                self.d2d.draw_text(
+                    "3-Finger Pinch Inward Action",
+                    D2D_RECT_F { left: 254.0, top: 210.0, right: 700.0, bottom: 235.0 },
+                    D2D1_COLOR_F { r: 0.85, g: 0.88, b: 0.95, a: 1.0 },
+                    14.0,
+                    true,
+                    false,
+                );
+
+                let on_rect = D2D_RECT_F { left: 250.0, top: 240.0, right: 325.0, bottom: 275.0 };
+                let off_rect = D2D_RECT_F { left: 335.0, top: 240.0, right: 410.0, bottom: 275.0 };
+                if cfg.pinch_enabled {
+                    self.d2d.fill_rounded_rect(on_rect, 8.0, accent);
+                    self.d2d.draw_text("ON", on_rect, D2D1_COLOR_F { r: 0.04, g: 0.05, b: 0.07, a: 1.0 }, 13.0, true, true);
+                    self.d2d.fill_rounded_rect(off_rect, 8.0, D2D1_COLOR_F { r: 0.12, g: 0.14, b: 0.18, a: 0.8 });
+                    self.d2d.draw_text("OFF", off_rect, D2D1_COLOR_F { r: 0.7, g: 0.75, b: 0.85, a: 1.0 }, 13.0, false, true);
+                } else {
+                    self.d2d.fill_rounded_rect(on_rect, 8.0, D2D1_COLOR_F { r: 0.12, g: 0.14, b: 0.18, a: 0.8 });
+                    self.d2d.draw_text("ON", on_rect, D2D1_COLOR_F { r: 0.7, g: 0.75, b: 0.85, a: 1.0 }, 13.0, false, true);
+                    self.d2d.fill_rounded_rect(off_rect, 8.0, accent);
+                    self.d2d.draw_text("OFF", off_rect, D2D1_COLOR_F { r: 0.04, g: 0.05, b: 0.07, a: 1.0 }, 13.0, true, true);
+                }
+            }
+            3 => {
+                // Appearance Tab: 8 Accent Swatches
+                self.d2d.draw_text(
+                    "Select Accent Color Theme",
+                    D2D_RECT_F { left: 254.0, top: 110.0, right: 700.0, bottom: 135.0 },
+                    D2D1_COLOR_F { r: 0.85, g: 0.88, b: 0.95, a: 1.0 },
+                    14.0,
+                    true,
+                    false,
+                );
+
+                for (idx, &(name, rgb)) in ACCENT_PRESETS.iter().enumerate() {
+                    let cx = 250.0 + idx as f32 * 65.0;
+                    let swatch_rect = D2D_RECT_F {
+                        left: cx,
+                        top: 150.0,
+                        right: cx + 48.0,
+                        bottom: 198.0,
+                    };
+                    let color = D2D1_COLOR_F {
+                        r: rgb[0] as f32 / 255.0,
+                        g: rgb[1] as f32 / 255.0,
+                        b: rgb[2] as f32 / 255.0,
+                        a: 1.0,
+                    };
+                    self.d2d.fill_rounded_rect(swatch_rect, 24.0, color);
+
+                    let is_active = cfg.accent == rgb;
+                    if is_active {
+                        self.d2d.draw_rounded_rect(
+                            D2D_RECT_F {
+                                left: cx - 4.0,
+                                top: 146.0,
+                                right: cx + 52.0,
+                                bottom: 202.0,
+                            },
+                            26.0,
+                            D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.9 },
+                            2.5,
+                        );
+                    }
+
+                    // Mini label
+                    self.d2d.draw_text(
+                        name.split_whitespace().next().unwrap_or(""),
+                        D2D_RECT_F {
+                            left: cx - 6.0,
+                            top: 206.0,
+                            right: cx + 54.0,
+                            bottom: 226.0,
+                        },
+                        D2D1_COLOR_F { r: 0.70, g: 0.75, b: 0.85, a: 1.0 },
+                        10.5,
+                        false,
+                        true,
+                    );
+                }
+
+                self.d2d.draw_text(
+                    "Backdrop Blur: 3-pass fast Gaussian hardware simulation (0.8ms)\nAntialiasing: Direct2D Per-Primitive Hardware Multisampling\nWindow Borders: Apple-style continuous rounded corners (Squircle)",
+                    D2D_RECT_F { left: 254.0, top: 260.0, right: 780.0, bottom: 350.0 },
+                    D2D1_COLOR_F { r: 0.65, g: 0.70, b: 0.80, a: 1.0 },
+                    13.0,
+                    false,
+                    false,
+                );
+            }
+            _ => {
+                // Windows Blocklist
+                self.d2d.draw_text(
+                    "Application Exclusions & Window Filtering",
+                    D2D_RECT_F { left: 254.0, top: 110.0, right: 700.0, bottom: 135.0 },
+                    D2D1_COLOR_F { r: 0.85, g: 0.88, b: 0.95, a: 1.0 },
+                    14.0,
+                    true,
+                    false,
+                );
+
+                let info = format!(
+                    "Excluded Applications Count: {}\n\nTip: You can middle-click any card in the switcher to instantly close that window!\n\nFiltered titles: {:?}",
+                    cfg.blocklist.len(),
+                    cfg.blocklist
+                );
+                self.d2d.draw_text(
+                    &info,
+                    D2D_RECT_F { left: 254.0, top: 150.0, right: 780.0, bottom: 350.0 },
+                    D2D1_COLOR_F { r: 0.75, g: 0.80, b: 0.90, a: 1.0 },
+                    13.5,
+                    false,
+                    false,
+                );
+            }
+        }
+
+        // Status message
+        if !self.status_msg.is_empty() {
+            self.d2d.draw_text(
+                &self.status_msg,
+                D2D_RECT_F {
+                    left: 254.0,
+                    top: self.height as f32 - 50.0,
+                    right: 440.0,
+                    bottom: self.height as f32 - 20.0,
+                },
+                accent,
+                13.0,
+                true,
+                false,
+            );
+        }
+
+        // Preview Button
+        let prev_rect = D2D_RECT_F {
+            left: 460.0,
+            top: self.height as f32 - 56.0,
+            right: 580.0,
+            bottom: self.height as f32 - 20.0,
         };
-        let detail_text = match self.active_tab {
-            0 => format!(
-                "Current Animation: {}\nDuration: {}s\nSpring Dynamics: RK4 High-Snappy Physics",
-                cfg.animation, cfg.duration
-            ),
-            1 => format!("Current Picker Layout: {}\nAvailable Layouts: Dock, Grid, Coverflow, Row, Hero, Wallet, Fan", cfg.layout),
-            2 => format!("Trigger Chord: {} + {}\nPinch Action: Enabled ({})", cfg.hotkey_mod, cfg.hotkey_key, cfg.pinch_enabled),
-            3 => format!("Accent RGB: [{}, {}, {}]\nBackdrop Blur: Dual-Pass Kawase GPU Blur", cfg.accent[0], cfg.accent[1], cfg.accent[2]),
-            _ => format!("Blocked Windows Count: {}\nBlocklist: {:?}", cfg.blocklist.len(), cfg.blocklist),
-        };
+        self.d2d.fill_rounded_rect(
+            prev_rect,
+            8.0,
+            D2D1_COLOR_F { r: 0.14, g: 0.16, b: 0.22, a: 0.9 },
+        );
+        self.d2d.draw_rounded_rect(
+            prev_rect,
+            8.0,
+            D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.15 },
+            1.0,
+        );
+        let preview_label = if self.active_tab == 0 { "Test Anim" } else { "Test Layout" };
         self.d2d.draw_text(
-            &detail_text,
-            val_rect,
-            D2D1_COLOR_F {
-                r: 0.85,
-                g: 0.88,
-                b: 0.95,
-                a: 1.0,
-            },
-            15.0,
-            false,
-            false,
+            preview_label,
+            prev_rect,
+            D2D1_COLOR_F { r: 0.90, g: 0.92, b: 0.98, a: 1.0 },
+            13.0,
+            true,
+            true,
         );
 
         // Save Button (Bottom-right)
         let save_rect = D2D_RECT_F {
-            left: self.width as f32 - 160.0,
-            top: self.height as f32 - 58.0,
+            left: self.width as f32 - 150.0,
+            top: self.height as f32 - 56.0,
             right: self.width as f32 - 24.0,
-            bottom: self.height as f32 - 18.0,
+            bottom: self.height as f32 - 20.0,
         };
-        self.d2d.fill_rounded_rect(save_rect, 10.0, accent);
+        self.d2d.fill_rounded_rect(save_rect, 8.0, accent);
         self.d2d.draw_text(
-            "Save",
+            "Save Changes",
             save_rect,
             D2D1_COLOR_F {
-                r: 0.05,
-                g: 0.07,
-                b: 0.1,
+                r: 0.04,
+                g: 0.05,
+                b: 0.07,
                 a: 1.0,
             },
-            14.0,
+            13.5,
             true,
             true,
         );

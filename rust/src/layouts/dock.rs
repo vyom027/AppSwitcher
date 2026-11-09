@@ -16,10 +16,10 @@ pub struct DockLayout {
 impl Default for DockLayout {
     fn default() -> Self {
         Self {
-            mag: 1.95,
-            card_w: 148.0,
-            card_h: 92.0,
-            gap: 18.0,
+            mag: 1.85,
+            card_w: 136.0,
+            card_h: 86.0,
+            gap: 16.0,
             focus: 0.0,
             selected: 0,
         }
@@ -54,54 +54,59 @@ impl PickerLayout for DockLayout {
             return;
         }
 
-        let base_y = sh - 42.0;
+        // ── 1. Vertical Metric Bands (Guarantees zero overlap) ───────────────
+        let base_y = sh - 36.0;
         let max_dock_h = self.card_h * self.mag;
-        let preview_bottom = base_y - max_dock_h - 48.0;
+        let shelf_top = base_y - max_dock_h - 16.0;
+        let title_y = shelf_top - 46.0;
+        let preview_bottom = title_y - 20.0;
+        let top_bound = 64.0; // below top pill badge (16..44)
 
-        // 1. Calculate natural aspect ratio of selected window
-        let (preview_w, preview_h) = if self.selected < bitmaps.len() {
+        let available_h = (preview_bottom - top_bound).max(160.0);
+
+        // ── 2. Natural Aspect Ratio of Selected Window ──────────────────────
+        let aspect = if self.selected < bitmaps.len() {
             if let Some(ref bmp) = bitmaps[self.selected] {
                 unsafe {
                     let sz = bmp.GetSize();
                     if sz.width > 0.0 && sz.height > 0.0 {
-                        let aspect = sz.width / sz.height;
-                        let max_h = (preview_bottom - 80.0).clamp(160.0, sh * 0.52);
-                        let max_w = (sw * 0.78).min(max_h * 2.2);
-                        let mut pw = max_w.min(max_h * aspect);
-                        let mut ph = pw / aspect;
-                        if ph > max_h {
-                            ph = max_h;
-                            pw = ph * aspect;
-                        }
-                        (pw, ph)
+                        sz.width / sz.height
                     } else {
-                        (sw * 0.52, (sw * 0.52) / 1.6)
+                        1.6
                     }
                 }
             } else {
-                (sw * 0.52, (sw * 0.52) / 1.6)
+                1.6
             }
         } else {
-            (sw * 0.52, (sw * 0.52) / 1.6)
+            1.6
         };
 
-        // Render Big Selected Preview Card
-        let prev_left = (sw - preview_w) * 0.5;
-        let prev_top = preview_bottom - preview_h;
+        let max_h = available_h.min(sh * 0.48);
+        let max_w = (sw * 0.80).min(max_h * 2.4);
+        let mut pw = max_w.min(max_h * aspect);
+        let mut ph = pw / aspect;
+        if ph > max_h {
+            ph = max_h;
+            pw = ph * aspect;
+        }
+
+        let prev_left = (sw - pw) * 0.5;
+        let prev_top = top_bound + (available_h - ph) * 0.5;
         let prev_rect = D2D_RECT_F {
             left: prev_left,
             top: prev_top,
-            right: prev_left + preview_w,
-            bottom: prev_top + preview_h,
+            right: prev_left + pw,
+            bottom: prev_top + ph,
         };
 
         // Ambient colored glow behind the preview card
-        d2d.draw_glow(prev_rect, 22.0, accent, 5);
+        d2d.draw_glow(prev_rect, 20.0, accent, 5);
 
         // Preview card dark glass background
         d2d.fill_rounded_rect(
             prev_rect,
-            22.0,
+            20.0,
             D2D1_COLOR_F {
                 r: 0.08,
                 g: 0.10,
@@ -110,41 +115,43 @@ impl PickerLayout for DockLayout {
             },
         );
 
-        // Preview thumbnail with true antialiased 22px rounded corners!
+        // Preview thumbnail with true antialiased 20px rounded corners
         if self.selected < bitmaps.len() {
             if let Some(ref bmp) = bitmaps[self.selected] {
-                d2d.fill_rounded_bitmap(bmp, prev_rect, 22.0, 1.0);
+                d2d.fill_rounded_bitmap(bmp, prev_rect, 20.0, 1.0);
             }
         }
 
         // Preview card accent outline
-        d2d.draw_rounded_rect(prev_rect, 22.0, accent, 2.5);
+        d2d.draw_rounded_rect(prev_rect, 20.0, accent, 2.5);
 
-        // Preview bottom reflection (Subtle Apple-style mirror reflection)
-        let refl_h = (preview_h * 0.25).min(75.0);
-        let refl_rect = D2D_RECT_F {
-            left: prev_left,
-            top: prev_top + preview_h + 4.0,
-            right: prev_left + preview_w,
-            bottom: prev_top + preview_h + 4.0 + refl_h,
-        };
-        if self.selected < bitmaps.len() {
+        // Subtle Apple-style mirror reflection strictly confined above title
+        let refl_top = prev_top + ph + 4.0;
+        let max_refl_h = (title_y - refl_top - 6.0).max(0.0);
+        let refl_h = (ph * 0.20).min(max_refl_h).min(50.0);
+        if refl_h > 4.0 && self.selected < bitmaps.len() {
             if let Some(ref bmp) = bitmaps[self.selected] {
-                d2d.fill_rounded_bitmap(bmp, refl_rect, 12.0, 0.20);
+                let refl_rect = D2D_RECT_F {
+                    left: prev_left,
+                    top: refl_top,
+                    right: prev_left + pw,
+                    bottom: refl_top + refl_h,
+                };
+                d2d.fill_rounded_bitmap(bmp, refl_rect, 10.0, 0.16);
             }
         }
 
-        // 2. Active Window Title (Centered above the preview)
+        // ── 3. Active Window Title (Centered above the dock shelf) ───────────
         let title_rect = D2D_RECT_F {
             left: 40.0,
-            top: prev_top - 46.0,
+            top: title_y,
             right: sw - 40.0,
-            bottom: prev_top - 10.0,
+            bottom: title_y + 36.0,
         };
         let title = if self.selected < windows.len() {
             let t = &windows[self.selected].title;
-            if t.chars().count() > 54 {
-                format!("{}...", t.chars().take(54).collect::<String>())
+            if t.chars().count() > 56 {
+                format!("{}...", t.chars().take(56).collect::<String>())
             } else {
                 t.clone()
             }
@@ -160,12 +167,12 @@ impl PickerLayout for DockLayout {
                 b: 1.0,
                 a: 1.0,
             },
-            18.0,
+            17.5,
             true,
             true,
         );
 
-        // 3. Render Bottom Floating Dock Shelf
+        // ── 4. Bottom Floating Dock Shelf ────────────────────────────────────
         let mut widths = Vec::with_capacity(n);
         let mut total_w = 0.0;
         for i in 0..n {
@@ -181,29 +188,29 @@ impl PickerLayout for DockLayout {
         let mut x = (sw - total_w) * 0.5;
 
         // Shelf background pill
-        let shelf_padding = 24.0;
+        let shelf_padding = 20.0;
         let shelf_rect = D2D_RECT_F {
             left: x - shelf_padding,
-            top: base_y - max_dock_h - 16.0,
+            top: shelf_top,
             right: x + total_w + shelf_padding,
-            bottom: base_y + 14.0,
+            bottom: base_y + 12.0,
         };
 
         // Dark glass shelf fill
         d2d.fill_rounded_rect(
             shelf_rect,
-            24.0,
+            22.0,
             D2D1_COLOR_F {
                 r: 0.06,
                 g: 0.08,
-                b: 0.12,
+                b: 0.11,
                 a: 0.78,
             },
         );
         // Subtle frosted border
         d2d.draw_rounded_rect(
             shelf_rect,
-            24.0,
+            22.0,
             D2D1_COLOR_F {
                 r: 1.0,
                 g: 1.0,
@@ -213,7 +220,7 @@ impl PickerLayout for DockLayout {
             1.5,
         );
 
-        // 4. Render Dock Cards
+        // ── 5. Render Dock Cards ─────────────────────────────────────────────
         for i in 0..n {
             let m = self.magnification(i);
             let w = widths[i];
@@ -241,14 +248,14 @@ impl PickerLayout for DockLayout {
                     r: 0.09,
                     g: 0.11,
                     b: 0.15,
-                    a: if is_sel { 1.0 } else { 0.82 },
+                    a: if is_sel { 1.0 } else { 0.80 },
                 },
             );
 
-            // Thumbnail with antialiased 14px rounded corners!
+            // Thumbnail with antialiased 14px rounded corners
             if i < bitmaps.len() {
                 if let Some(ref bmp) = bitmaps[i] {
-                    d2d.fill_rounded_bitmap(bmp, card_rect, 14.0, if is_sel { 1.0 } else { 0.82 });
+                    d2d.fill_rounded_bitmap(bmp, card_rect, 14.0, if is_sel { 1.0 } else { 0.80 });
                 }
             }
 
@@ -263,7 +270,7 @@ impl PickerLayout for DockLayout {
                         r: 1.0,
                         g: 1.0,
                         b: 1.0,
-                        a: 0.12,
+                        a: 0.10,
                     },
                     1.0,
                 );
@@ -274,7 +281,7 @@ impl PickerLayout for DockLayout {
     }
 
     fn hit_test(&self, px: f32, py: f32, count: usize, sw: f32, sh: f32) -> Option<usize> {
-        let base_y = sh - 42.0;
+        let base_y = sh - 36.0;
         let mut widths = Vec::with_capacity(count);
         let mut total_w = 0.0;
         for i in 0..count {

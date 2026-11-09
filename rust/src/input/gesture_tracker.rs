@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-pub const SWIPE_THRESHOLD: f64 = 200.0;
+pub const SWIPE_THRESHOLD: f64 = 260.0;
 pub const DWELL_SECS: f64 = 0.20;
 pub const PREWARM_SECS: f64 = 0.10;
 pub const MOVE_EPS: f64 = 18.0;
@@ -29,6 +29,8 @@ pub struct GestureTracker {
     base_spread: f64,
     last_spread: f64,
     pinched: bool,
+    swiped: bool,
+    last_swipe: Instant,
 
     on_swipe: Box<dyn Fn(i32) + Send + Sync>,
     on_hold_swipe: Box<dyn Fn(i32) + Send + Sync>,
@@ -56,6 +58,8 @@ impl GestureTracker {
             base_spread: 0.0,
             last_spread: 0.0,
             pinched: false,
+            swiped: false,
+            last_swipe: Instant::now(),
             on_swipe: Box::new(on_swipe),
             on_hold_swipe: Box::new(on_hold_swipe),
             on_arm: on_arm.map(|a| Box::new(a) as Box<dyn Fn() + Send + Sync>),
@@ -75,6 +79,8 @@ impl GestureTracker {
         self.base_spread = 0.0;
         self.last_spread = 0.0;
         self.pinched = false;
+        self.swiped = false;
+        self.last_swipe = Instant::now();
     }
 
     fn calculate_spread(contacts: &HashMap<u32, (f64, f64)>, avg_x: f64, avg_y: f64) -> f64 {
@@ -163,8 +169,19 @@ impl GestureTracker {
         // Swipe travel check
         let dx = avg_x - self.base_x;
         let dy = (avg_y - self.base_y).abs();
-        if dx.abs() >= SWIPE_THRESHOLD && dy < dx.abs() * 0.9 {
+        let elapsed_since_swipe = now.duration_since(self.last_swipe).as_millis();
+
+        if !self.swiped && dx.abs() >= SWIPE_THRESHOLD && dy < dx.abs() * 0.9 {
             let dir = if dx > 0.0 { 1 } else { -1 };
+            self.swiped = true;
+            self.last_swipe = now;
+            (self.on_swipe)(dir);
+            self.base_x = avg_x;
+            self.base_y = avg_y;
+            self.still_since = now;
+        } else if self.swiped && dx.abs() >= (SWIPE_THRESHOLD * 2.2) && elapsed_since_swipe >= 450 && dy < dx.abs() * 0.9 {
+            let dir = if dx > 0.0 { 1 } else { -1 };
+            self.last_swipe = now;
             (self.on_swipe)(dir);
             self.base_x = avg_x;
             self.base_y = avg_y;
