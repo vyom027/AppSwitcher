@@ -33,6 +33,7 @@ impl PickerLayout for WalletLayout {
         d2d: &D2DContext,
         windows: &[WindowInfo],
         bitmaps: &[Option<ID2D1Bitmap>],
+        icons: &[Option<ID2D1Bitmap>],
         accent: D2D1_COLOR_F,
         sw: f32,
         sh: f32,
@@ -49,7 +50,7 @@ impl PickerLayout for WalletLayout {
         let mut indices: Vec<usize> = (0..n).collect();
         indices.sort_by_key(|&i| -(i as isize - self.selected as isize).abs());
 
-        for i in indices {
+        for &i in &indices {
             let offset = i as f32 - self.selected as f32;
             let abs_off = offset.abs();
 
@@ -85,9 +86,9 @@ impl PickerLayout for WalletLayout {
                 rect,
                 16.0,
                 D2D1_COLOR_F {
-                    r: 0.1,
-                    g: 0.12,
-                    b: 0.16,
+                    r: 0.09,
+                    g: 0.11,
+                    b: 0.15,
                     a: if is_sel { 1.0 } else { 0.78 },
                 },
             );
@@ -113,33 +114,149 @@ impl PickerLayout for WalletLayout {
                     1.0,
                 );
             }
+
+            // Wallet card top header badge
+            let header_w = (w - 24.0).max(60.0);
+            let header_rect = D2D_RECT_F {
+                left: rect.left + 12.0,
+                top: rect.top + 10.0,
+                right: rect.left + 12.0 + header_w,
+                bottom: rect.top + 42.0,
+            };
+            d2d.fill_rounded_rect(
+                header_rect,
+                8.0,
+                D2D1_COLOR_F {
+                    r: 0.05,
+                    g: 0.07,
+                    b: 0.10,
+                    a: 0.88,
+                },
+            );
+            d2d.draw_rounded_rect(
+                header_rect,
+                8.0,
+                D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 0.18,
+                },
+                1.0,
+            );
+
+            // App Icon
+            if i < icons.len() {
+                if let Some(ref icon_bmp) = icons[i] {
+                    let ic_rect = D2D_RECT_F {
+                        left: header_rect.left + 8.0,
+                        top: header_rect.top + 5.0,
+                        right: header_rect.left + 30.0,
+                        bottom: header_rect.top + 27.0,
+                    };
+                    d2d.draw_bitmap(icon_bmp, ic_rect, 1.0);
+                }
+            }
+
+            // Title inside card header
+            let title_text = &windows[i].title;
+            let title_display = if title_text.chars().count() > 36 {
+                format!("{}...", title_text.chars().take(36).collect::<String>())
+            } else {
+                title_text.clone()
+            };
+            let text_rect = D2D_RECT_F {
+                left: header_rect.left + 36.0,
+                top: header_rect.top,
+                right: header_rect.right - 8.0,
+                bottom: header_rect.bottom,
+            };
+            d2d.draw_text(
+                &title_display,
+                text_rect,
+                D2D1_COLOR_F {
+                    r: 0.95,
+                    g: 0.96,
+                    b: 1.0,
+                    a: if is_sel { 1.0 } else { 0.80 },
+                },
+                12.5,
+                is_sel,
+                false,
+            );
         }
 
-        // Title
-        let title_rect = D2D_RECT_F {
-            left: 40.0,
-            top: cy - self.card_h * 0.5 - 54.0,
-            right: sw - 40.0,
-            bottom: cy - self.card_h * 0.5 - 18.0,
-        };
-        let title = if self.selected < windows.len() {
-            &windows[self.selected].title
-        } else {
-            ""
-        };
-        d2d.draw_text(
-            title,
-            title_rect,
-            D2D1_COLOR_F {
-                r: 0.95,
-                g: 0.96,
-                b: 1.0,
-                a: 1.0,
-            },
-            18.0,
-            true,
-            true,
-        );
+        // Active title pill above the wallet stack
+        if self.selected < windows.len() {
+            let active_title = &windows[self.selected].title;
+            let title_display = if active_title.chars().count() > 50 {
+                format!("{}...", active_title.chars().take(50).collect::<String>())
+            } else {
+                active_title.clone()
+            };
+            let pill_h = 36.0;
+            let pill_y = (cy - self.card_h * 0.5 - 64.0).max(52.0);
+            let pill_w = (title_display.len() as f32 * 8.0 + 70.0).clamp(240.0, 600.0);
+            let pill_rect = D2D_RECT_F {
+                left: (sw - pill_w) * 0.5,
+                top: pill_y,
+                right: (sw + pill_w) * 0.5,
+                bottom: pill_y + pill_h,
+            };
+            d2d.fill_rounded_rect(
+                pill_rect,
+                18.0,
+                D2D1_COLOR_F {
+                    r: 0.05,
+                    g: 0.07,
+                    b: 0.10,
+                    a: 0.88,
+                },
+            );
+            d2d.draw_rounded_rect(
+                pill_rect,
+                18.0,
+                D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 0.18,
+                },
+                1.0,
+            );
+
+            if self.selected < icons.len() {
+                if let Some(ref icon_bmp) = icons[self.selected] {
+                    let ic_rect = D2D_RECT_F {
+                        left: pill_rect.left + 10.0,
+                        top: pill_rect.top + 7.0,
+                        right: pill_rect.left + 32.0,
+                        bottom: pill_rect.top + 29.0,
+                    };
+                    d2d.draw_bitmap(icon_bmp, ic_rect, 1.0);
+                }
+            }
+
+            let text_rect = D2D_RECT_F {
+                left: pill_rect.left + 38.0,
+                top: pill_rect.top,
+                right: pill_rect.right - 14.0,
+                bottom: pill_rect.bottom,
+            };
+            d2d.draw_text(
+                &title_display,
+                text_rect,
+                D2D1_COLOR_F {
+                    r: 0.96,
+                    g: 0.97,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                14.0,
+                true,
+                false,
+            );
+        }
     }
 
     fn hit_test(&self, px: f32, py: f32, count: usize, sw: f32, sh: f32) -> Option<usize> {

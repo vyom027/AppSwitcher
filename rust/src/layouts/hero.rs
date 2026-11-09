@@ -35,6 +35,7 @@ impl PickerLayout for HeroLayout {
         d2d: &D2DContext,
         windows: &[WindowInfo],
         bitmaps: &[Option<ID2D1Bitmap>],
+        icons: &[Option<ID2D1Bitmap>],
         accent: D2D1_COLOR_F,
         sw: f32,
         sh: f32,
@@ -45,7 +46,7 @@ impl PickerLayout for HeroLayout {
         }
 
         let film_y = sh - 36.0 - self.film_h;
-        let preview_h = (film_y - 80.0).clamp(120.0, sh * 0.58);
+        let preview_h = (film_y - 90.0).clamp(120.0, sh * 0.58);
         let preview_w = (preview_h * 1.6).min(sw * 0.88);
 
         // 1. Big Hero Preview
@@ -79,31 +80,117 @@ impl PickerLayout for HeroLayout {
 
         d2d.draw_rounded_rect(prev_rect, 18.0, accent, 2.0);
 
-        // Title
-        let title_rect = D2D_RECT_F {
-            left: 40.0,
-            top: prev_top + preview_h + 12.0,
-            right: sw - 40.0,
-            bottom: prev_top + preview_h + 46.0,
-        };
-        let title = if self.selected < windows.len() {
-            &windows[self.selected].title
-        } else {
-            ""
-        };
-        d2d.draw_text(
-            title,
-            title_rect,
-            D2D1_COLOR_F {
-                r: 0.95,
-                g: 0.96,
-                b: 1.0,
-                a: 1.0,
-            },
-            18.0,
-            true,
-            true,
-        );
+        // Hero App Icon Badge in preview top-left
+        if self.selected < icons.len() {
+            if let Some(ref icon_bmp) = icons[self.selected] {
+                let b_rect = D2D_RECT_F {
+                    left: prev_left + 16.0,
+                    top: prev_top + 16.0,
+                    right: prev_left + 54.0,
+                    bottom: prev_top + 54.0,
+                };
+                d2d.fill_rounded_rect(
+                    b_rect,
+                    10.0,
+                    D2D1_COLOR_F {
+                        r: 0.04,
+                        g: 0.05,
+                        b: 0.08,
+                        a: 0.88,
+                    },
+                );
+                d2d.draw_rounded_rect(
+                    b_rect,
+                    10.0,
+                    D2D1_COLOR_F {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 0.22,
+                    },
+                    1.0,
+                );
+                let ic_rect = D2D_RECT_F {
+                    left: b_rect.left + 5.0,
+                    top: b_rect.top + 5.0,
+                    right: b_rect.right - 5.0,
+                    bottom: b_rect.bottom - 5.0,
+                };
+                d2d.draw_bitmap(icon_bmp, ic_rect, 1.0);
+            }
+        }
+
+        // Title Pill
+        if self.selected < windows.len() {
+            let active_title = &windows[self.selected].title;
+            let title_display = if active_title.chars().count() > 50 {
+                format!("{}...", active_title.chars().take(50).collect::<String>())
+            } else {
+                active_title.clone()
+            };
+            let pill_h = 36.0;
+            let pill_y = prev_top + preview_h + 12.0;
+            let pill_w = (title_display.len() as f32 * 8.0 + 70.0).clamp(240.0, 600.0);
+            let pill_rect = D2D_RECT_F {
+                left: (sw - pill_w) * 0.5,
+                top: pill_y,
+                right: (sw + pill_w) * 0.5,
+                bottom: pill_y + pill_h,
+            };
+            d2d.fill_rounded_rect(
+                pill_rect,
+                18.0,
+                D2D1_COLOR_F {
+                    r: 0.05,
+                    g: 0.07,
+                    b: 0.10,
+                    a: 0.88,
+                },
+            );
+            d2d.draw_rounded_rect(
+                pill_rect,
+                18.0,
+                D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 0.18,
+                },
+                1.0,
+            );
+
+            if self.selected < icons.len() {
+                if let Some(ref icon_bmp) = icons[self.selected] {
+                    let ic_rect = D2D_RECT_F {
+                        left: pill_rect.left + 10.0,
+                        top: pill_rect.top + 7.0,
+                        right: pill_rect.left + 32.0,
+                        bottom: pill_rect.top + 29.0,
+                    };
+                    d2d.draw_bitmap(icon_bmp, ic_rect, 1.0);
+                }
+            }
+
+            let text_rect = D2D_RECT_F {
+                left: pill_rect.left + 38.0,
+                top: pill_rect.top,
+                right: pill_rect.right - 14.0,
+                bottom: pill_rect.bottom,
+            };
+            d2d.draw_text(
+                &title_display,
+                text_rect,
+                D2D1_COLOR_F {
+                    r: 0.96,
+                    g: 0.97,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                14.0,
+                true,
+                false,
+            );
+        }
 
         // 2. Bottom Filmstrip
         let film_stride = self.film_w + self.gap;
@@ -161,6 +248,48 @@ impl PickerLayout for HeroLayout {
                     },
                     1.0,
                 );
+            }
+
+            // Filmstrip Card App Icon Badge
+            if i < icons.len() {
+                if let Some(ref icon_bmp) = icons[i] {
+                    let b_size = 20.0;
+                    let b_pad = 2.5;
+                    let b_rect = D2D_RECT_F {
+                        left: x + 6.0,
+                        top: y + 6.0,
+                        right: x + 6.0 + b_size + b_pad * 2.0,
+                        bottom: y + 6.0 + b_size + b_pad * 2.0,
+                    };
+                    d2d.fill_rounded_rect(
+                        b_rect,
+                        5.0,
+                        D2D1_COLOR_F {
+                            r: 0.05,
+                            g: 0.07,
+                            b: 0.10,
+                            a: 0.88,
+                        },
+                    );
+                    d2d.draw_rounded_rect(
+                        b_rect,
+                        5.0,
+                        D2D1_COLOR_F {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 0.20,
+                        },
+                        1.0,
+                    );
+                    let ic_rect = D2D_RECT_F {
+                        left: b_rect.left + b_pad,
+                        top: b_rect.top + b_pad,
+                        right: b_rect.right - b_pad,
+                        bottom: b_rect.bottom - b_pad,
+                    };
+                    d2d.draw_bitmap(icon_bmp, ic_rect, 1.0);
+                }
             }
         }
     }

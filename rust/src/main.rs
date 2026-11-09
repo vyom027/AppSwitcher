@@ -16,7 +16,7 @@ use std::thread;
 use ui::{OverlayWindow, PickerMode, SettingsDialog, TrayIcon};
 use window::{
     bring_to_front, capture_window_image, create_placeholder, get_open_windows, nudge_cursor,
-    sort_by_mru, start_mru_watcher,
+    sort_by_mru, start_mru_watcher, enumerator::WindowInfo,
 };
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, WPARAM, LPARAM};
@@ -81,6 +81,37 @@ fn signal_existing_instance() {
             let _ = SetEvent(handle);
             let _ = CloseHandle(handle);
         }
+    }
+}
+
+fn commit_window_switch(
+    overlay: &OverlayWindow,
+    settings: &parking_lot::RwLock<Settings>,
+    mru: &[WindowInfo],
+    sel: usize,
+) {
+    if sel == 0 || sel >= mru.len() {
+        bring_to_front(mru[0].hwnd);
+        nudge_cursor();
+        return;
+    }
+
+    let (anim_name, duration) = {
+        let cfg = settings.read();
+        (cfg.animation.clone(), cfg.duration as f32)
+    };
+    let anim_kind = TransitionKind::from_str(&anim_name);
+    let curr_hwnd = mru[0].hwnd;
+    let target_hwnd = mru[sel].hwnd;
+
+    let curr_img = capture_window_image(curr_hwnd);
+    let next_img = capture_window_image(target_hwnd);
+
+    if let (Some(c), Some(n)) = (curr_img, next_img) {
+        overlay.run_switch_transition(1, &c, &n, target_hwnd, anim_kind, duration);
+    } else {
+        bring_to_front(target_hwnd);
+        nudge_cursor();
     }
 }
 
@@ -234,8 +265,7 @@ fn main() {
                                     sensitivity,
                                     &event_rx,
                                 ) {
-                                    bring_to_front(mru[sel].hwnd);
-                                    nudge_cursor();
+                                    commit_window_switch(&overlay, &settings, &mru, sel);
                                 }
                             }
                         }
@@ -268,8 +298,7 @@ fn main() {
                                     sensitivity,
                                     &event_rx,
                                 ) {
-                                    bring_to_front(mru[sel].hwnd);
-                                    nudge_cursor();
+                                    commit_window_switch(&overlay, &settings, &mru, sel);
                                 }
                             }
                         }

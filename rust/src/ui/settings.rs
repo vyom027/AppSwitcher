@@ -56,7 +56,10 @@ const LAYOUT_NAMES: &[(&str, &str)] = &[
     ("fan", "Curved Radial Card Arc"),
 ];
 
-const ANIM_NAMES: &[&str] = &["slide", "duo_fold", "fade", "zoom", "cube", "flip"];
+const ANIM_NAMES: &[&str] = &[
+    "slide", "duo_fold", "fade", "zoom",
+    "cube", "flip", "push", "stack",
+];
 
 unsafe extern "system" fn settings_wnd_proc(
     hwnd: HWND,
@@ -230,18 +233,20 @@ impl SettingsDialog {
         match self.active_tab {
             0 => {
                 // Motion & Speed Tab:
-                // Animation selection: row of pills at y = 140..175
-                if y >= 140.0 && y <= 175.0 && x >= 250.0 {
-                    let col = ((x - 250.0) / 95.0) as usize;
-                    if col < ANIM_NAMES.len() {
-                        let selected_anim = ANIM_NAMES[col].to_string();
+                // Animation selection: 2 rows of 4 pills at y = 135..215
+                if y >= 135.0 && y <= 215.0 && x >= 250.0 {
+                    let row = if y >= 175.0 { 1 } else { 0 };
+                    let col = ((x - 250.0) / 135.0) as usize;
+                    let idx = row * 4 + col;
+                    if idx < ANIM_NAMES.len() && col < 4 {
+                        let selected_anim = ANIM_NAMES[idx].to_string();
                         self.settings.write().animation = selected_anim.clone();
                         let _ = self.settings.read().save();
                         self.status_msg = format!("Animation set to {}", selected_anim);
                     }
                 }
-                // Duration presets: y = 230..265
-                if y >= 230.0 && y <= 265.0 && x >= 250.0 {
+                // Duration presets: y = 255..290
+                if y >= 255.0 && y <= 290.0 && x >= 250.0 {
                     let presets = [0.14, 0.22, 0.32, 0.45];
                     let col = ((x - 250.0) / 125.0) as usize;
                     if col < presets.len() {
@@ -250,8 +255,8 @@ impl SettingsDialog {
                         self.status_msg = format!("Duration set to {}s", presets[col]);
                     }
                 }
-                // Sensitivity presets: y = 320..355
-                if y >= 320.0 && y <= 355.0 && x >= 250.0 {
+                // Sensitivity presets: y = 340..375
+                if y >= 340.0 && y <= 375.0 && x >= 250.0 {
                     let sens = [160, 220, 300];
                     let col = ((x - 250.0) / 135.0) as usize;
                     if col < sens.len() {
@@ -467,13 +472,16 @@ impl SettingsDialog {
                     false,
                 );
 
-                for (col, &anim) in ANIM_NAMES.iter().enumerate() {
-                    let ax = 250.0 + col as f32 * 95.0;
+                for (idx, &anim) in ANIM_NAMES.iter().enumerate() {
+                    let row = idx / 4;
+                    let col = idx % 4;
+                    let ax = 250.0 + col as f32 * 135.0;
+                    let ay = 138.0 + row as f32 * 40.0;
                     let pill_rect = D2D_RECT_F {
                         left: ax,
-                        top: 140.0,
-                        right: ax + 88.0,
-                        bottom: 175.0,
+                        top: ay,
+                        right: ax + 125.0,
+                        bottom: ay + 34.0,
                     };
                     let is_sel = cfg.animation.replace('_', " ").eq_ignore_ascii_case(&anim.replace('_', " "));
                     if is_sel {
@@ -508,9 +516,9 @@ impl SettingsDialog {
                     "Transition Speed",
                     D2D_RECT_F {
                         left: 254.0,
-                        top: 200.0,
+                        top: 228.0,
                         right: 700.0,
-                        bottom: 225.0,
+                        bottom: 250.0,
                     },
                     D2D1_COLOR_F { r: 0.85, g: 0.88, b: 0.95, a: 1.0 },
                     14.0,
@@ -523,9 +531,9 @@ impl SettingsDialog {
                     let dx = 250.0 + col as f32 * 125.0;
                     let rect = D2D_RECT_F {
                         left: dx,
-                        top: 230.0,
+                        top: 255.0,
                         right: dx + 118.0,
-                        bottom: 265.0,
+                        bottom: 290.0,
                     };
                     let is_sel = (cfg.duration - val).abs() < 0.03;
                     if is_sel {
@@ -560,9 +568,9 @@ impl SettingsDialog {
                     "Touchpad Glide Sensitivity",
                     D2D_RECT_F {
                         left: 254.0,
-                        top: 290.0,
+                        top: 312.0,
                         right: 700.0,
-                        bottom: 315.0,
+                        bottom: 334.0,
                     },
                     D2D1_COLOR_F { r: 0.85, g: 0.88, b: 0.95, a: 1.0 },
                     14.0,
@@ -575,9 +583,9 @@ impl SettingsDialog {
                     let sx = 250.0 + col as f32 * 135.0;
                     let rect = D2D_RECT_F {
                         left: sx,
-                        top: 320.0,
+                        top: 340.0,
                         right: sx + 125.0,
-                        bottom: 355.0,
+                        bottom: 375.0,
                     };
                     let is_sel = cfg.sensitivity == val;
                     if is_sel {

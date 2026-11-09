@@ -18,6 +18,7 @@ pub trait PickerLayout {
         d2d: &D2DContext,
         windows: &[WindowInfo],
         bitmaps: &[Option<ID2D1Bitmap>],
+        icons: &[Option<ID2D1Bitmap>],
         accent: D2D1_COLOR_F,
         sw: f32,
         sh: f32,

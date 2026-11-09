@@ -258,6 +258,15 @@ impl OverlayWindow {
             let elapsed = start_time.elapsed();
             let t = (elapsed.as_secs_f32() / target_duration.as_secs_f32()).min(1.0);
 
+            // Pump Windows messages to prevent "Not Responding" during rapid swipes
+            unsafe {
+                let mut msg = MSG::default();
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+
             // Out-Cubic easing curve for organic motion
             let eased_t = 1.0 - (1.0 - t).powi(3);
 
@@ -348,6 +357,18 @@ impl OverlayWindow {
             .into_iter()
             .map(|opt_img| {
                 opt_img.and_then(|img| {
+                    self.d2d
+                        .create_bitmap_from_rgba(img.width, img.height, &img.pixels)
+                        .ok()
+                })
+            })
+            .collect();
+
+        // 3. Concurrently retrieve window icons
+        let icons: Vec<Option<ID2D1Bitmap>> = windows
+            .iter()
+            .map(|w| {
+                crate::window::get_window_icon(w.hwnd).and_then(|img| {
                     self.d2d
                         .create_bitmap_from_rgba(img.width, img.height, &img.pixels)
                         .ok()
@@ -578,7 +599,7 @@ impl OverlayWindow {
             );
 
             // Active layout
-            layout.render(&self.d2d, windows, &bitmaps, accent, sw, sh);
+            layout.render(&self.d2d, windows, &bitmaps, &icons, accent, sw, sh);
 
             let _ = self.d2d.end_draw();
 

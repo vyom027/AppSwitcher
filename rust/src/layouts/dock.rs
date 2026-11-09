@@ -45,6 +45,7 @@ impl PickerLayout for DockLayout {
         d2d: &D2DContext,
         windows: &[WindowInfo],
         bitmaps: &[Option<ID2D1Bitmap>],
+        icons: &[Option<ID2D1Bitmap>],
         accent: D2D1_COLOR_F,
         sw: f32,
         sh: f32,
@@ -124,6 +125,46 @@ impl PickerLayout for DockLayout {
 
         // Preview card accent outline
         d2d.draw_rounded_rect(prev_rect, 20.0, accent, 2.5);
+
+        // Preview card app icon badge
+        if self.selected < icons.len() {
+            if let Some(ref icon_bmp) = icons[self.selected] {
+                let badge_rect = D2D_RECT_F {
+                    left: prev_left + 16.0,
+                    top: prev_top + 16.0,
+                    right: prev_left + 54.0,
+                    bottom: prev_top + 54.0,
+                };
+                d2d.fill_rounded_rect(
+                    badge_rect,
+                    10.0,
+                    D2D1_COLOR_F {
+                        r: 0.04,
+                        g: 0.05,
+                        b: 0.08,
+                        a: 0.88,
+                    },
+                );
+                d2d.draw_rounded_rect(
+                    badge_rect,
+                    10.0,
+                    D2D1_COLOR_F {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 0.22,
+                    },
+                    1.0,
+                );
+                let ic_rect = D2D_RECT_F {
+                    left: badge_rect.left + 5.0,
+                    top: badge_rect.top + 5.0,
+                    right: badge_rect.right - 5.0,
+                    bottom: badge_rect.bottom - 5.0,
+                };
+                d2d.draw_bitmap(icon_bmp, ic_rect, 1.0);
+            }
+        }
 
         // Subtle Apple-style mirror reflection strictly confined above title
         let refl_top = prev_top + ph + 4.0;
@@ -274,6 +315,48 @@ impl PickerLayout for DockLayout {
                     },
                     1.0,
                 );
+            }
+
+            // App icon badge
+            if i < icons.len() {
+                if let Some(ref icon_bmp) = icons[i] {
+                    let b_size = (20.0 * m).clamp(20.0, 32.0);
+                    let b_pad = 3.0;
+                    let b_rect = D2D_RECT_F {
+                        left: card_rect.left + 8.0,
+                        top: card_rect.top + 8.0,
+                        right: card_rect.left + 8.0 + b_size + b_pad * 2.0,
+                        bottom: card_rect.top + 8.0 + b_size + b_pad * 2.0,
+                    };
+                    d2d.fill_rounded_rect(
+                        b_rect,
+                        6.0,
+                        D2D1_COLOR_F {
+                            r: 0.05,
+                            g: 0.07,
+                            b: 0.10,
+                            a: 0.88,
+                        },
+                    );
+                    d2d.draw_rounded_rect(
+                        b_rect,
+                        6.0,
+                        D2D1_COLOR_F {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 0.20,
+                        },
+                        1.0,
+                    );
+                    let ic_rect = D2D_RECT_F {
+                        left: b_rect.left + b_pad,
+                        top: b_rect.top + b_pad,
+                        right: b_rect.right - b_pad,
+                        bottom: b_rect.bottom - b_pad,
+                    };
+                    d2d.draw_bitmap(icon_bmp, ic_rect, 1.0);
+                }
             }
 
             x += w + self.gap;

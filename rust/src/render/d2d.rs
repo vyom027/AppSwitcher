@@ -199,6 +199,24 @@ impl D2DContext {
         }
     }
 
+    pub fn draw_bitmap_subrect(
+        &self,
+        bitmap: &ID2D1Bitmap,
+        dest_rect: D2D_RECT_F,
+        src_rect: D2D_RECT_F,
+        opacity: f32,
+    ) {
+        unsafe {
+            self.rt.DrawBitmap(
+                bitmap,
+                Some(&dest_rect),
+                opacity,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                Some(&src_rect),
+            );
+        }
+    }
+
     /// Pixel-perfect antialiased rounded rectangle filled with a scaled bitmap
     pub fn fill_rounded_bitmap(
         &self,
