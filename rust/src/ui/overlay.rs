@@ -11,7 +11,7 @@ use crate::layouts::PickerLayout;
 use crate::render::d2d::D2DContext;
 use crate::render::spring::{Spring, SpringConfig};
 use crate::window::capture::{
-    capture_windows_parallel, get_backdrop, screen_size, ImageBuffer,
+    capture_windows_parallel, get_backdrop, work_area, ImageBuffer,
 };
 use crate::window::enumerator::WindowInfo;
 use crate::window::foreground::{bring_to_front, nudge_cursor};
@@ -35,8 +35,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, PeekMessageW, PostMessageW,
     RegisterClassExW, SetWindowPos, ShowWindow, TranslateMessage, HWND_TOPMOST, MSG, PM_REMOVE,
-    SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW, WM_CLOSE, WM_QUIT, WNDCLASSEXW, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW, WM_CLOSE, WM_QUIT, WNDCLASSEXW,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +47,8 @@ pub enum PickerMode {
 
 pub struct OverlayWindow {
     pub hwnd: HWND,
-    pub width: u32,
-    pub height: u32,
+    pub width: std::sync::atomic::AtomicU32,
+    pub height: std::sync::atomic::AtomicU32,
     pub d2d: D2DContext,
 }
 
@@ -66,9 +66,9 @@ unsafe extern "system" fn overlay_wnd_proc(
 
 impl OverlayWindow {
     pub fn new() -> Result<Self, windows::core::Error> {
-        let (sw, sh) = screen_size();
-        let width = sw as u32;
-        let height = sh as u32;
+        let (wx, wy, ww, wh) = work_area();
+        let width = ww.max(100) as u32;
+        let height = wh.max(100) as u32;
 
         unsafe {
             let h_instance = GetModuleHandleW(None)?;
@@ -90,10 +90,10 @@ impl OverlayWindow {
                 class_name,
                 w!("AppSwitcherOverlay"),
                 style,
-                0,
-                0,
-                sw,
-                sh,
+                wx,
+                wy,
+                ww,
+                wh,
                 HWND(std::ptr::null_mut()),
                 None,
                 h_instance,
@@ -122,11 +122,38 @@ impl OverlayWindow {
 
             Ok(Self {
                 hwnd,
-                width,
-                height,
+                width: std::sync::atomic::AtomicU32::new(width),
+                height: std::sync::atomic::AtomicU32::new(height),
                 d2d,
             })
         }
+    }
+
+    pub fn sync_work_area(&self) -> (f32, f32) {
+        let (wx, wy, ww, wh) = work_area();
+        let ww_u = ww.max(100) as u32;
+        let wh_u = wh.max(100) as u32;
+
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                HWND_TOPMOST,
+                wx,
+                wy,
+                ww,
+                wh,
+                SWP_NOACTIVATE,
+            );
+        }
+
+        let old_w = self.width.swap(ww_u, std::sync::atomic::Ordering::SeqCst);
+        let old_h = self.height.swap(wh_u, std::sync::atomic::Ordering::SeqCst);
+
+        if old_w != ww_u || old_h != wh_u {
+            self.d2d.resize(ww_u, wh_u);
+        }
+
+        (ww as f32, wh as f32)
     }
 
     pub fn show(&self) {
@@ -160,11 +187,9 @@ impl OverlayWindow {
         anim_kind: TransitionKind,
         duration_secs: f32,
     ) {
-        self.show();
+        let (sw, sh) = self.sync_work_area();
 
-        let sw = self.width as f32;
-        let sh = self.height as f32;
-
+        // 1. Capture backdrop and create bitmaps BEFORE revealing the window!
         let bg = get_backdrop();
         let bg_bmp = self
             .d2d
@@ -194,6 +219,36 @@ impl OverlayWindow {
                 return;
             }
         };
+
+        // 2. Pre-render initial frame 0 to D2D surface before window is shown (Zero white screen!)
+        self.d2d.begin_draw();
+        if let Some(ref bg) = bg_bmp {
+            self.d2d.draw_bitmap(
+                bg,
+                D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: sw,
+                    bottom: sh,
+                },
+                1.0,
+            );
+        } else {
+            self.d2d.clear(0.04, 0.05, 0.08, 1.0);
+        }
+        anim_kind.render(
+            &self.d2d,
+            &curr_bmp,
+            &next_bmp,
+            0.0,
+            direction,
+            sw,
+            sh,
+        );
+        let _ = self.d2d.end_draw();
+
+        // 3. Now reveal window cleanly
+        self.show();
 
         let start_time = Instant::now();
         let target_duration = Duration::from_secs_f32(duration_secs.max(0.12));
@@ -266,10 +321,7 @@ impl OverlayWindow {
             return None;
         }
 
-        self.show();
-
-        let sw = self.width as f32;
-        let sh = self.height as f32;
+        let (sw, sh) = self.sync_work_area();
 
         let mut layout: Box<dyn PickerLayout> = match layout_name.to_lowercase().as_str() {
             "grid" => Box::new(GridLayout::default()),
@@ -330,6 +382,8 @@ impl OverlayWindow {
                 "glide fingers to pick · lift to switch · Middle-click close · Esc cancel".to_string()
             }
         };
+
+        self.show();
 
         loop {
             let dt = last_frame.elapsed().as_secs_f64();

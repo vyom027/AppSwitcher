@@ -68,9 +68,9 @@ const BACKDROP_TTL: Duration = Duration::from_millis(1500);
 
 pub fn prewarm_backdrop() {
     thread::spawn(|| {
-        let (sw, sh) = screen_size();
-        if sw > 0 && sh > 0 {
-            let bg = capture_frosted_backdrop(sw, sh);
+        let (wx, wy, ww, wh) = work_area();
+        if ww > 0 && wh > 0 {
+            let bg = capture_frosted_backdrop(wx, wy, ww, wh);
             *BACKDROP_CACHE.lock() = Some((Instant::now(), bg));
         }
     });
@@ -86,8 +86,8 @@ pub fn get_backdrop() -> ImageBuffer {
             }
         }
     }
-    let (sw, sh) = screen_size();
-    let bg = capture_frosted_backdrop(sw, sh);
+    let (wx, wy, ww, wh) = work_area();
+    let bg = capture_frosted_backdrop(wx, wy, ww, wh);
     *BACKDROP_CACHE.lock() = Some((now, bg.clone()));
     bg
 }
@@ -177,10 +177,10 @@ fn box_blur_1d(src: &[u8], dst: &mut [u8], w: usize, h: usize, radius: usize, ho
 }
 
 /// Fast downsampled frosted backdrop capture with box blur + dark tint
-pub fn capture_frosted_backdrop(sw: i32, sh: i32) -> ImageBuffer {
+pub fn capture_frosted_backdrop(wx: i32, wy: i32, ww: i32, wh: i32) -> ImageBuffer {
     let scale = 4;
-    let bw = (sw / scale).max(1) as u32;
-    let bh = (sh / scale).max(1) as u32;
+    let bw = (ww / scale).max(1) as u32;
+    let bh = (wh / scale).max(1) as u32;
 
     unsafe {
         let hdc_screen = GetDC(GetDesktopWindow());
@@ -196,12 +196,14 @@ pub fn capture_frosted_backdrop(sw: i32, sh: i32) -> ImageBuffer {
             bw as i32,
             bh as i32,
             hdc_screen,
-            0,
-            0,
-            sw,
-            sh,
+            wx,
+            wy,
+            ww,
+            wh,
             SRCCOPY,
         );
+
+        SelectObject(hdc_mem, old_obj);
 
         let mut bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -231,7 +233,6 @@ pub fn capture_frosted_backdrop(sw: i32, sh: i32) -> ImageBuffer {
             DIB_RGB_COLORS,
         );
 
-        SelectObject(hdc_mem, old_obj);
         let _ = DeleteObject(hbm);
         let _ = DeleteDC(hdc_mem);
         let _ = ReleaseDC(GetDesktopWindow(), hdc_screen);
@@ -409,6 +410,8 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
                 bmiColors: [windows::Win32::Graphics::Gdi::RGBQUAD::default()],
             };
 
+            SelectObject(hdc_mem, old_obj);
+
             let mut raw_pixels = vec![0u8; (w * h * 4) as usize];
             let lines = GetDIBits(
                 hdc_mem,
@@ -420,7 +423,6 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
                 DIB_RGB_COLORS,
             );
 
-            SelectObject(hdc_mem, old_obj);
             let _ = DeleteObject(hbm);
             let _ = DeleteDC(hdc_mem);
             let _ = ReleaseDC(GetDesktopWindow(), hdc_screen);
@@ -467,6 +469,8 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
                     bmiColors: [windows::Win32::Graphics::Gdi::RGBQUAD::default()],
                 };
 
+                SelectObject(hdc_mem, old_obj);
+
                 let mut raw_pixels = vec![0u8; (w * h * 4) as usize];
                 let lines = GetDIBits(
                     hdc_mem,
@@ -478,7 +482,6 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
                     DIB_RGB_COLORS,
                 );
 
-                SelectObject(hdc_mem, old_obj);
                 let _ = DeleteObject(hbm);
                 let _ = DeleteDC(hdc_mem);
                 let _ = ReleaseDC(hwnd, hdc_window);

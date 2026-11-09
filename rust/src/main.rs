@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::thread;
 use ui::{OverlayWindow, PickerMode, SettingsDialog, TrayIcon};
 use window::{
-    bring_to_front, capture_window_image, get_open_windows, nudge_cursor, sort_by_mru,
-    start_mru_watcher,
+    bring_to_front, capture_window_image, create_placeholder, get_open_windows, nudge_cursor,
+    sort_by_mru, start_mru_watcher,
 };
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, WPARAM, LPARAM};
@@ -282,6 +282,7 @@ fn main() {
                                 (cfg.blocklist.clone(), cfg.animation.clone(), cfg.duration as f32)
                             };
                             let mru = sort_by_mru(get_open_windows(&blocklist, false));
+                            let anim_kind = TransitionKind::from_str(&anim_name);
                             if mru.len() >= 2 {
                                 let target_idx = if direction > 0 { 1 } else { mru.len() - 1 };
                                 let curr_hwnd = mru[0].hwnd;
@@ -291,7 +292,6 @@ fn main() {
                                 let next_img = capture_window_image(target_hwnd);
 
                                 if let (Some(c), Some(n)) = (curr_img, next_img) {
-                                    let anim_kind = TransitionKind::from_str(&anim_name);
                                     overlay.run_switch_transition(
                                         direction,
                                         &c,
@@ -304,6 +304,18 @@ fn main() {
                                     bring_to_front(target_hwnd);
                                     nudge_cursor();
                                 }
+                            } else {
+                                // Fallback for preview/testing with fewer than 2 apps
+                                let c = create_placeholder("App 1 (Demo)", 640, 420);
+                                let n = create_placeholder("App 2 (Demo)", 640, 420);
+                                overlay.run_switch_transition(
+                                    direction,
+                                    &c,
+                                    &n,
+                                    HWND(std::ptr::null_mut()),
+                                    anim_kind,
+                                    duration,
+                                );
                             }
                             // Drain any excess swipe events that arrived during animation
                             while let Ok(AppEvent::Swipe(_)) = event_rx.try_recv() {}

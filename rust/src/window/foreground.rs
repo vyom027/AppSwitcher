@@ -56,6 +56,9 @@ pub fn nudge_cursor() {
 }
 
 pub fn bring_to_front(hwnd: HWND) {
+    if hwnd.0.is_null() {
+        return;
+    }
     invalidate_window_cache();
 
     unsafe {

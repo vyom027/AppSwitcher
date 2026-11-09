@@ -1,6 +1,6 @@
 use crate::render::d2d::D2DContext;
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
-use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 
 pub struct DuoFoldTransition {
     pub direction: i32,
@@ -42,7 +42,24 @@ impl DuoFoldTransition {
         let curr_hinge_left = self.direction > 0;
         let next_hinge_left = self.direction <= 0;
 
-        // Next panel unfolds forward
+        // 1. Deep modern obsidian void backdrop behind folding panels (Prevents any white bleed)
+        d2d.fill_rounded_rect(
+            D2D_RECT_F {
+                left: 0.0,
+                top: 0.0,
+                right: sw,
+                bottom: sh,
+            },
+            0.0,
+            D2D1_COLOR_F {
+                r: 0.03,
+                g: 0.04,
+                b: 0.06,
+                a: 0.96,
+            },
+        );
+
+        // 2. Next panel unfolds forward from 3D depth
         let next_bend = (1.0 - t) * self.max_bend_next;
         let next_scale = 1.0 - next_bend.sin() * 0.12;
         let next_w = sw * next_scale;
@@ -57,10 +74,29 @@ impl DuoFoldTransition {
             bottom: next_y + next_h,
         };
 
-        let next_opacity = 0.5 + 0.5 * t;
+        // Ambient depth shadow under unfolding panel
+        if t < 0.95 {
+            d2d.fill_rounded_rect(
+                D2D_RECT_F {
+                    left: next_x - 10.0,
+                    top: next_y - 8.0,
+                    right: next_x + next_w + 10.0,
+                    bottom: next_y + next_h + 10.0,
+                },
+                16.0,
+                D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.40 * (1.0 - t),
+                },
+            );
+        }
+
+        let next_opacity = 0.55 + 0.45 * t;
         d2d.draw_bitmap(next_bitmap, next_rect, next_opacity);
 
-        // Current panel folds back into void
+        // 3. Current panel folds away into void
         let curr_bend = t * self.max_bend_current;
         let curr_scale = 1.0 - curr_bend.sin() * 0.28;
         let curr_w = sw * curr_scale;
@@ -82,7 +118,35 @@ impl DuoFoldTransition {
         };
 
         if curr_opacity > 0.001 {
+            // Shadow behind folding panel
+            d2d.fill_rounded_rect(
+                D2D_RECT_F {
+                    left: curr_x - 12.0,
+                    top: curr_y - 10.0,
+                    right: curr_x + curr_w + 12.0,
+                    bottom: curr_y + curr_h + 12.0,
+                },
+                18.0,
+                D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.55 * curr_opacity,
+                },
+            );
             d2d.draw_bitmap(curr_bitmap, curr_rect, curr_opacity);
+            // Subtle glass edge highlight along folding edge
+            d2d.draw_rounded_rect(
+                curr_rect,
+                4.0,
+                D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 0.12 * curr_opacity,
+                },
+                1.5,
+            );
         }
     }
 }

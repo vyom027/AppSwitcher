@@ -2,9 +2,11 @@ use std::mem::size_of;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetLastActivePopup, GetWindowLongW, GetWindowTextLengthW,
-    GetWindowTextW, IsWindowVisible, GA_ROOTOWNER, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+    GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, GA_ROOTOWNER, GWL_EXSTYLE,
+    WS_EX_TOOLWINDOW,
 };
 
 #[derive(Debug, Clone)]
@@ -59,6 +61,12 @@ pub fn is_alt_tab_window(hwnd: HWND) -> bool {
         let title = String::from_utf16_lossy(&buf[..read as usize]);
 
         if title == "Program Manager" || title == "Windows Input Experience" {
+            return false;
+        }
+
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == GetCurrentProcessId() {
             return false;
         }
 

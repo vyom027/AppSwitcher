@@ -5,15 +5,19 @@ use crossbeam_channel::Sender;
 use std::mem::size_of;
 use std::sync::Arc;
 use windows::core::w;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
-use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, EndPaint, RedrawWindow, ScreenToClient, PAINTSTRUCT, RDW_INVALIDATE,
+    RDW_UPDATENOW,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, PostMessageW, RegisterClassExW,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE,
-    SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_PAINT,
-    WNDCLASSEXW, WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+    AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, GetClientRect, GetCursorPos,
+    GetWindowLongPtrW, PostMessageW, RegisterClassExW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    GWLP_USERDATA, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE,
+    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_PAINT, WNDCLASSEXW, WS_CAPTION, WS_MINIMIZEBOX,
+    WS_OVERLAPPED, WS_SYSMENU,
 };
 
 pub struct SettingsDialog {
@@ -75,11 +79,15 @@ unsafe extern "system" fn settings_wnd_proc(
                 return LRESULT(1);
             }
             WM_LBUTTONDOWN => {
-                let x = (l_param.0 & 0xFFFF) as i16 as f32;
-                let y = ((l_param.0 >> 16) & 0xFFFF) as i16 as f32;
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let _ = ScreenToClient(hwnd, &mut pt);
+                let x = pt.x as f32;
+                let y = pt.y as f32;
 
                 dlg.handle_click(x, y);
-                let _ = InvalidateRect(hwnd, None, false);
+                dlg.render();
+                let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW);
                 return LRESULT(0);
             }
             WM_CLOSE => {
@@ -98,8 +106,8 @@ impl SettingsDialog {
         event_tx: Sender<AppEvent>,
         main_hwnd: usize,
     ) -> Result<Box<Self>, windows::core::Error> {
-        let width = 860;
-        let height = 580;
+        let desired_w = 860;
+        let desired_h = 580;
 
         unsafe {
             let h_instance = GetModuleHandleW(None)?;
@@ -115,6 +123,16 @@ impl SettingsDialog {
 
             let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 
+            let mut rc = RECT {
+                left: 0,
+                top: 0,
+                right: desired_w as i32,
+                bottom: desired_h as i32,
+            };
+            let _ = AdjustWindowRectEx(&mut rc, style, false, WINDOW_EX_STYLE(0));
+            let win_w = rc.right - rc.left;
+            let win_h = rc.bottom - rc.top;
+
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 class_name,
@@ -122,13 +140,18 @@ impl SettingsDialog {
                 style,
                 120,
                 120,
-                width as i32,
-                height as i32,
+                win_w,
+                win_h,
                 HWND(std::ptr::null_mut()),
                 None,
                 h_instance,
                 None,
             )?;
+
+            let mut client_rc = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client_rc);
+            let width = (client_rc.right - client_rc.left).max(800) as u32;
+            let height = (client_rc.bottom - client_rc.top).max(520) as u32;
 
             let d2d = D2DContext::new(hwnd, width, height)?;
 
@@ -154,7 +177,7 @@ impl SettingsDialog {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
             let _ = SetWindowPos(self.hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-            let _ = InvalidateRect(self.hwnd, None, false);
+            let _ = RedrawWindow(self.hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW);
         }
         self.render();
     }
@@ -171,10 +194,10 @@ impl SettingsDialog {
         }
 
         // Bottom Action Buttons
-        let btn_y = self.height as f32 - 56.0;
+        let btn_y = self.height as f32 - 58.0;
 
-        // Preview button: x 460..580
-        if y >= btn_y && y <= btn_y + 36.0 && x >= 460.0 && x <= 580.0 {
+        // Preview button: x 440..600
+        if y >= btn_y - 6.0 && y <= self.height as f32 && x >= 440.0 && x <= 600.0 {
             if self.active_tab == 0 {
                 let _ = self.event_tx.send(AppEvent::Swipe(1));
             } else {
@@ -188,11 +211,12 @@ impl SettingsDialog {
                     LPARAM(0),
                 );
             }
+            self.status_msg = "Testing preview...".to_string();
             return;
         }
 
-        // Save button: x >= width - 150
-        if y >= btn_y && y <= btn_y + 36.0 && x >= self.width as f32 - 150.0 {
+        // Save button: x >= width - 170
+        if y >= btn_y - 6.0 && y <= self.height as f32 && x >= self.width as f32 - 170.0 {
             let cfg = self.settings.read().clone();
             if cfg.save().is_ok() {
                 self.status_msg = "Saved successfully!".to_string();
@@ -210,8 +234,10 @@ impl SettingsDialog {
                 if y >= 140.0 && y <= 175.0 && x >= 250.0 {
                     let col = ((x - 250.0) / 95.0) as usize;
                     if col < ANIM_NAMES.len() {
-                        self.settings.write().animation = ANIM_NAMES[col].to_string();
+                        let selected_anim = ANIM_NAMES[col].to_string();
+                        self.settings.write().animation = selected_anim.clone();
                         let _ = self.settings.read().save();
+                        self.status_msg = format!("Animation set to {}", selected_anim);
                     }
                 }
                 // Duration presets: y = 230..265
@@ -221,6 +247,7 @@ impl SettingsDialog {
                     if col < presets.len() {
                         self.settings.write().duration = presets[col];
                         let _ = self.settings.read().save();
+                        self.status_msg = format!("Duration set to {}s", presets[col]);
                     }
                 }
                 // Sensitivity presets: y = 320..355
@@ -230,6 +257,7 @@ impl SettingsDialog {
                     if col < sens.len() {
                         self.settings.write().sensitivity = sens[col];
                         let _ = self.settings.read().save();
+                        self.status_msg = format!("Sensitivity set to {}px", sens[col]);
                     }
                 }
             }
@@ -238,8 +266,10 @@ impl SettingsDialog {
                 if x >= 250.0 && x <= 790.0 && y >= 130.0 {
                     let row = ((y - 130.0) / 52.0) as usize;
                     if row < LAYOUT_NAMES.len() {
-                        self.settings.write().layout = LAYOUT_NAMES[row].0.to_string();
+                        let selected_layout = LAYOUT_NAMES[row].0.to_string();
+                        self.settings.write().layout = selected_layout.clone();
                         let _ = self.settings.read().save();
+                        self.status_msg = format!("Layout set to {}", selected_layout);
                     }
                 }
             }
@@ -250,12 +280,14 @@ impl SettingsDialog {
                     let is_ctrl = x >= 355.0;
                     self.settings.write().hotkey_mod = if is_ctrl { "ctrl".to_string() } else { "alt".to_string() };
                     let _ = self.settings.read().save();
+                    self.status_msg = format!("Hotkey set to {}", if is_ctrl { "Ctrl+Tab" } else { "Alt+Tab" });
                 }
                 // Pinch toggle: y = 240..275
                 if y >= 240.0 && y <= 275.0 && x >= 250.0 && x <= 420.0 {
                     let cur = self.settings.read().pinch_enabled;
                     self.settings.write().pinch_enabled = !cur;
                     let _ = self.settings.read().save();
+                    self.status_msg = format!("Pinch gesture {}", if !cur { "enabled" } else { "disabled" });
                 }
             }
             3 => {
@@ -265,6 +297,7 @@ impl SettingsDialog {
                     if idx < ACCENT_PRESETS.len() {
                         self.settings.write().accent = ACCENT_PRESETS[idx].1;
                         let _ = self.settings.read().save();
+                        self.status_msg = format!("Theme set to {}", ACCENT_PRESETS[idx].0);
                     }
                 }
             }
@@ -442,7 +475,7 @@ impl SettingsDialog {
                         right: ax + 88.0,
                         bottom: 175.0,
                     };
-                    let is_sel = cfg.animation.eq_ignore_ascii_case(anim);
+                    let is_sel = cfg.animation.replace('_', " ").eq_ignore_ascii_case(&anim.replace('_', " "));
                     if is_sel {
                         self.d2d.fill_rounded_rect(pill_rect, 8.0, accent);
                         self.d2d.draw_text(
