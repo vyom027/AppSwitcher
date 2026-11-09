@@ -32,8 +32,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage, TranslateMessage, MSG,
 };
 
-const MUTEX_NAME: PCWSTR = w!("AppSwitcher_Running_Mutex");
-const SHOW_SETTINGS_EVENT: PCWSTR = w!("AppSwitcher_ShowSettings_Event");
+const MUTEX_NAME: PCWSTR = w!("AppSwitcher_Rust_Running_Mutex");
+const SHOW_SETTINGS_EVENT: PCWSTR = w!("AppSwitcher_Rust_ShowSettings_Event");
+const PY_MUTEX_NAME: PCWSTR = w!("AppSwitcher_Running_Mutex");
 
 struct SingleInstanceGuard {
     handle: HANDLE,
@@ -57,6 +58,18 @@ fn acquire_single_instance() -> Option<SingleInstanceGuard> {
             return None;
         }
         Some(SingleInstanceGuard { handle })
+    }
+}
+
+fn check_python_instance() -> bool {
+    unsafe {
+        if let Ok(handle) = CreateMutexW(None, false, PY_MUTEX_NAME) {
+            let exists = GetLastError() == ERROR_ALREADY_EXISTS;
+            let _ = CloseHandle(handle);
+            exists
+        } else {
+            false
+        }
     }
 }
 
@@ -107,6 +120,11 @@ fn main() {
     println!("  * System Tray icon            -> Settings & Quit options");
     println!("  Press Ctrl+C in console to stop                         ");
     println!("==========================================================");
+
+    if check_python_instance() {
+        println!("[warning] An instance of Python AppSwitcher was detected running.");
+        println!("          Close it from System Tray or Task Manager to ensure full control of gestures/Alt+Tab.");
+    }
 
     // 3. Load user settings
     let settings = Arc::new(parking_lot::RwLock::new(Settings::load()));
@@ -181,13 +199,14 @@ fn main() {
                 while let Ok(event) = event_rx.try_recv() {
                     match event {
                         AppEvent::AltTab { direction } => {
-                            let (blocklist, layout_name, accent_rgb, use_ctrl) = {
+                            let (blocklist, layout_name, accent_rgb, use_ctrl, sensitivity) = {
                                 let cfg = settings.read();
                                 (
                                     cfg.blocklist.clone(),
                                     cfg.layout.clone(),
                                     cfg.accent,
                                     cfg.hotkey_mod.eq_ignore_ascii_case("ctrl"),
+                                    cfg.sensitivity as f32,
                                 )
                             };
                             let mru = sort_by_mru(get_open_windows(&blocklist, false));
@@ -206,6 +225,7 @@ fn main() {
                                     accent,
                                     PickerMode::AltTab,
                                     use_ctrl,
+                                    sensitivity,
                                     &event_rx,
                                 ) {
                                     bring_to_front(mru[sel].hwnd);
@@ -214,13 +234,14 @@ fn main() {
                             }
                         }
                         AppEvent::Hold => {
-                            let (blocklist, layout_name, accent_rgb, use_ctrl) = {
+                            let (blocklist, layout_name, accent_rgb, use_ctrl, sensitivity) = {
                                 let cfg = settings.read();
                                 (
                                     cfg.blocklist.clone(),
                                     cfg.layout.clone(),
                                     cfg.accent,
                                     cfg.hotkey_mod.eq_ignore_ascii_case("ctrl"),
+                                    cfg.sensitivity as f32,
                                 )
                             };
                             let mru = sort_by_mru(get_open_windows(&blocklist, false));
@@ -238,6 +259,7 @@ fn main() {
                                     accent,
                                     PickerMode::Touchpad,
                                     use_ctrl,
+                                    sensitivity,
                                     &event_rx,
                                 ) {
                                     bring_to_front(mru[sel].hwnd);

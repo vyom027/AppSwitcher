@@ -73,7 +73,7 @@ impl PickerLayout for HeroLayout {
 
         if self.selected < bitmaps.len() {
             if let Some(ref bmp) = bitmaps[self.selected] {
-                d2d.draw_bitmap(bmp, prev_rect, 1.0);
+                d2d.fill_rounded_bitmap(bmp, prev_rect, 18.0, 1.0);
             }
         }
 
@@ -143,7 +143,7 @@ impl PickerLayout for HeroLayout {
 
             if i < bitmaps.len() {
                 if let Some(ref bmp) = bitmaps[i] {
-                    d2d.draw_bitmap(bmp, card_rect, if is_sel { 1.0 } else { 0.75 });
+                    d2d.fill_rounded_bitmap(bmp, card_rect, 12.0, if is_sel { 1.0 } else { 0.75 });
                 }
             }
 

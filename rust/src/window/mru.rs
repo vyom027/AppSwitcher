@@ -36,6 +36,17 @@ pub fn mru_rank(hwnd: HWND) -> usize {
 
 pub fn sort_by_mru(mut windows: Vec<WindowInfo>) -> Vec<WindowInfo> {
     windows.sort_by_key(|w| mru_rank(w.hwnd));
+
+    unsafe {
+        let fg = GetForegroundWindow();
+        if !fg.0.is_null() {
+            if let Some(idx) = windows.iter().position(|w| w.hwnd == fg) {
+                let current = windows.remove(idx);
+                windows.insert(0, current);
+            }
+        }
+    }
+
     windows
 }
 

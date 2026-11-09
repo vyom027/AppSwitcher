@@ -91,7 +91,7 @@ impl PickerLayout for FanLayout {
 
             if i < bitmaps.len() {
                 if let Some(ref bmp) = bitmaps[i] {
-                    d2d.draw_bitmap(bmp, rect, if is_sel { 1.0 } else { 0.8 });
+                    d2d.fill_rounded_bitmap(bmp, rect, 14.0, if is_sel { 1.0 } else { 0.8 });
                 }
             }
 

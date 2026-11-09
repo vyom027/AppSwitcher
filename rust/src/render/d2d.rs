@@ -1,12 +1,14 @@
 use windows::core::{w, Interface};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
+    D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1RenderTarget,
-    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1Brush, ID2D1Factory,
+    ID2D1HwndRenderTarget, ID2D1RenderTarget, ID2D1SolidColorBrush,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_BRUSH_PROPERTIES,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
     D2D1_PRESENT_OPTIONS_IMMEDIATELY, D2D1_RENDER_TARGET_PROPERTIES, D2D1_ROUNDED_RECT,
 };
@@ -193,6 +195,59 @@ impl D2DContext {
                 D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
                 None,
             );
+        }
+    }
+
+    /// Pixel-perfect antialiased rounded rectangle filled with a scaled bitmap
+    pub fn fill_rounded_bitmap(
+        &self,
+        bitmap: &ID2D1Bitmap,
+        dest_rect: D2D_RECT_F,
+        radius: f32,
+        opacity: f32,
+    ) {
+        unsafe {
+            let bmp_size = bitmap.GetSize();
+            if bmp_size.width <= 0.0 || bmp_size.height <= 0.0 {
+                return;
+            }
+
+            let brush_props = D2D1_BITMAP_BRUSH_PROPERTIES {
+                extendModeX: D2D1_EXTEND_MODE_CLAMP,
+                extendModeY: D2D1_EXTEND_MODE_CLAMP,
+                interpolationMode: D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+            };
+
+            let dest_w = dest_rect.right - dest_rect.left;
+            let dest_h = dest_rect.bottom - dest_rect.top;
+            if dest_w <= 0.0 || dest_h <= 0.0 {
+                return;
+            }
+
+            let scale_x = dest_w / bmp_size.width;
+            let scale_y = dest_h / bmp_size.height;
+
+            let transform = windows::Foundation::Numerics::Matrix3x2 {
+                M11: scale_x,
+                M12: 0.0,
+                M21: 0.0,
+                M22: scale_y,
+                M31: dest_rect.left,
+                M32: dest_rect.top,
+            };
+
+            if let Ok(brush) = self.rt.CreateBitmapBrush(bitmap, Some(&brush_props), None) {
+                brush.SetTransform(&transform);
+                brush.SetOpacity(opacity);
+                let rounded = D2D1_ROUNDED_RECT {
+                    rect: dest_rect,
+                    radiusX: radius,
+                    radiusY: radius,
+                };
+                if let Ok(b) = brush.cast::<ID2D1Brush>() {
+                    self.rt.FillRoundedRectangle(&rounded, &b);
+                }
+            }
         }
     }
 

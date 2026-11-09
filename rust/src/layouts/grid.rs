@@ -91,10 +91,10 @@ impl PickerLayout for GridLayout {
                 },
             );
 
-            // Thumbnail
+            // Thumbnail with smooth antialiased 16px corners
             if i < bitmaps.len() {
                 if let Some(ref bmp) = bitmaps[i] {
-                    d2d.draw_bitmap(bmp, rect, if is_sel { 1.0 } else { 0.85 });
+                    d2d.fill_rounded_bitmap(bmp, rect, 16.0, if is_sel { 1.0 } else { 0.85 });
                 }
             }
 

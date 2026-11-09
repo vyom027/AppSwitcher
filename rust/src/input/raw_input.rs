@@ -190,7 +190,13 @@ pub fn run_input_thread(
     };
 
     let on_arm = || {
-        // Pre-warm signal
+        crate::window::capture::prewarm_backdrop();
+        let top_hwnds: Vec<windows::Win32::Foundation::HWND> = crate::window::enumerator::get_open_windows(&[], false)
+            .iter()
+            .take(8)
+            .map(|w| w.hwnd)
+            .collect();
+        crate::window::capture::prewarm_windows(&top_hwnds);
     };
 
     *TRACKER.lock() = Some(GestureTracker::new(
