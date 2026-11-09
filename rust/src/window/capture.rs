@@ -12,8 +12,9 @@ use windows::Win32::Graphics::Gdi::{
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HALFTONE, HDC, SRCCOPY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetDesktopWindow, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, IsIconic, SystemParametersInfoW, SM_CXSCREEN, SM_CYSCREEN, SPI_GETWORKAREA,
+    DispatchMessageW, GetDesktopWindow, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, IsIconic, IsZoomed, PeekMessageW, SystemParametersInfoW,
+    TranslateMessage, MSG, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SPI_GETWORKAREA,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
@@ -357,16 +358,22 @@ static FRAME_CACHE: LazyLock<Mutex<HashMap<isize, (Instant, ImageBuffer)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 const FRAME_TTL: Duration = Duration::from_millis(2500);
 
+static IS_PREWARMING_WINDOWS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn prewarm_windows(hwnds: &[HWND]) {
+    if IS_PREWARMING_WINDOWS.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let list: Vec<usize> = hwnds.iter().map(|h| h.0 as usize).collect();
     thread::spawn(move || {
         let now = Instant::now();
         for h in list {
             let hwnd = HWND(h as *mut _);
-            if let Some(img) = capture_window_image_uncached(hwnd) {
+            if let Some(img) = capture_window_image(hwnd) {
                 FRAME_CACHE.lock().insert(h as isize, (now, img));
             }
         }
+        IS_PREWARMING_WINDOWS.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 }
 
@@ -397,6 +404,139 @@ pub fn create_placeholder(_title: &str, width: u32, height: u32) -> ImageBuffer 
     }
 }
 
+pub fn grab_screen_rect(x: i32, y: i32, w: i32, h: i32) -> Option<ImageBuffer> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    unsafe {
+        let hdc_screen = GetDC(GetDesktopWindow());
+        if hdc_screen.0.is_null() {
+            return None;
+        }
+        let hdc_mem = CreateCompatibleDC(hdc_screen);
+        let hbm = CreateCompatibleBitmap(hdc_screen, w, h);
+        let old_obj = SelectObject(hdc_mem, hbm);
+
+        let _ = BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, x, y, SRCCOPY);
+
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [windows::Win32::Graphics::Gdi::RGBQUAD::default()],
+        };
+
+        SelectObject(hdc_mem, old_obj);
+
+        let mut raw_pixels = vec![0u8; (w * h * 4) as usize];
+        let lines = GetDIBits(
+            hdc_mem,
+            hbm,
+            0,
+            h as u32,
+            Some(raw_pixels.as_mut_ptr() as *mut _),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+
+        let _ = DeleteObject(hbm);
+        let _ = DeleteDC(hdc_mem);
+        let _ = ReleaseDC(GetDesktopWindow(), hdc_screen);
+
+        if lines > 0 {
+            for chunk in raw_pixels.chunks_exact_mut(4) {
+                let b = chunk[0];
+                let r = chunk[2];
+                chunk[0] = r;
+                chunk[2] = b;
+                chunk[3] = 255;
+            }
+            Some(ImageBuffer {
+                width: w as u32,
+                height: h as u32,
+                pixels: raw_pixels,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+fn crop_inner(img: &ImageBuffer, crop_x: u32, crop_y: u32, crop_w: u32, crop_h: u32) -> ImageBuffer {
+    let mut out = vec![0u8; (crop_w * crop_h * 4) as usize];
+    let src_stride = (img.width * 4) as usize;
+    let dst_stride = (crop_w * 4) as usize;
+
+    for row in 0..crop_h {
+        let sy = (crop_y + row) as usize;
+        if sy >= img.height as usize {
+            break;
+        }
+        let sx = (crop_x * 4) as usize;
+        if sx < src_stride {
+            let copy_bytes = (crop_w * 4) as usize;
+            let available = src_stride - sx;
+            let len = copy_bytes.min(available);
+            let row_src = &img.pixels[sy * src_stride + sx..sy * src_stride + sx + len];
+            let row_dst = &mut out[(row as usize) * dst_stride..(row as usize) * dst_stride + len];
+            row_dst.copy_from_slice(row_src);
+        }
+    }
+
+    ImageBuffer {
+        width: crop_w,
+        height: crop_h,
+        pixels: out,
+    }
+}
+
+fn compose_over_backdrop(win: &ImageBuffer, dx: i32, dy: i32, ww: u32, wh: u32) -> ImageBuffer {
+    let mut canvas = vec![0u8; (ww * wh * 4) as usize];
+    for chunk in canvas.chunks_exact_mut(4) {
+        chunk[0] = 16;
+        chunk[1] = 18;
+        chunk[2] = 24;
+        chunk[3] = 255;
+    }
+
+    let win_w = win.width as i32;
+    let win_h = win.height as i32;
+    let dst_stride = (ww * 4) as usize;
+    let src_stride = (win.width * 4) as usize;
+
+    for y in 0..win_h {
+        let cy = dy + y;
+        if cy < 0 || cy >= wh as i32 {
+            continue;
+        }
+        for x in 0..win_w {
+            let cx = dx + x;
+            if cx < 0 || cx >= ww as i32 {
+                continue;
+            }
+            let si = (y as usize) * src_stride + (x as usize) * 4;
+            let di = (cy as usize) * dst_stride + (cx as usize) * 4;
+            canvas[di..di + 4].copy_from_slice(&win.pixels[si..si + 4]);
+        }
+    }
+
+    ImageBuffer {
+        width: ww,
+        height: wh,
+        pixels: canvas,
+    }
+}
+
 pub fn capture_window_image(hwnd: HWND) -> Option<ImageBuffer> {
     let raw = hwnd.0 as isize;
     let now = Instant::now();
@@ -409,7 +549,6 @@ pub fn capture_window_image(hwnd: HWND) -> Option<ImageBuffer> {
         }
     }
 
-    // 1. If foreground and not iconic, fast screen DC grab takes < 1ms on calling thread
     let is_fg = unsafe {
         GetForegroundWindow() == hwnd && !IsIconic(hwnd).as_bool()
     };
@@ -421,7 +560,6 @@ pub fn capture_window_image(hwnd: HWND) -> Option<ImageBuffer> {
         return img;
     }
 
-    // 2. Off-thread capture with strict 120ms timeout to prevent UI hang on unresponsive windows
     let raw_hwnd = hwnd.0 as usize;
     let (tx, rx) = crossbeam_channel::bounded::<Option<ImageBuffer>>(1);
     thread::spawn(move || {
@@ -435,14 +573,7 @@ pub fn capture_window_image(hwnd: HWND) -> Option<ImageBuffer> {
             FRAME_CACHE.lock().insert(raw, (now, buf.clone()));
             Some(buf)
         }
-        Ok(None) => {
-            let title = get_window_title_safe(hwnd);
-            let ph = create_placeholder(&title, 480, 300);
-            FRAME_CACHE.lock().insert(raw, (now, ph.clone()));
-            Some(ph)
-        }
-        Err(_) => {
-            // Window is slow / hung / PrintWindow timed out: return placeholder immediately!
+        Ok(None) | Err(_) => {
             let title = get_window_title_safe(hwnd);
             let ph = create_placeholder(&title, 480, 300);
             FRAME_CACHE.lock().insert(raw, (now, ph.clone()));
@@ -470,6 +601,11 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
         return Some(create_placeholder("AppSwitcher", 480, 300));
     }
 
+    let (wx, wy, ww, wh) = work_area();
+    if ww <= 0 || wh <= 0 {
+        return Some(create_placeholder("", 480, 300));
+    }
+
     unsafe {
         let mut rect = RECT::default();
         if GetWindowRect(hwnd, &mut rect).is_err() {
@@ -484,67 +620,18 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
 
         let is_iconic = IsIconic(hwnd).as_bool();
         let is_fg = GetForegroundWindow() == hwnd;
+        let is_maximized = IsZoomed(hwnd).as_bool();
 
         // 1. Fast screen DC grab if foreground and not minimized
-        if is_fg && !is_iconic && rect.left >= 0 && rect.top >= 0 {
-            let hdc_screen = GetDC(GetDesktopWindow());
-            let hdc_mem = CreateCompatibleDC(hdc_screen);
-            let hbm = CreateCompatibleBitmap(hdc_screen, w, h);
-            let old_obj = SelectObject(hdc_mem, hbm);
-
-            let _ = BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, rect.left, rect.top, SRCCOPY);
-
-            let mut bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: w,
-                    biHeight: -h,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    biSizeImage: 0,
-                    biXPelsPerMeter: 0,
-                    biYPelsPerMeter: 0,
-                    biClrUsed: 0,
-                    biClrImportant: 0,
-                },
-                bmiColors: [windows::Win32::Graphics::Gdi::RGBQUAD::default()],
-            };
-
-            SelectObject(hdc_mem, old_obj);
-
-            let mut raw_pixels = vec![0u8; (w * h * 4) as usize];
-            let lines = GetDIBits(
-                hdc_mem,
-                hbm,
-                0,
-                h as u32,
-                Some(raw_pixels.as_mut_ptr() as *mut _),
-                &mut bmi,
-                DIB_RGB_COLORS,
-            );
-
-            let _ = DeleteObject(hbm);
-            let _ = DeleteDC(hdc_mem);
-            let _ = ReleaseDC(GetDesktopWindow(), hdc_screen);
-
-            if lines > 0 {
-                for chunk in raw_pixels.chunks_exact_mut(4) {
-                    let b = chunk[0];
-                    let r = chunk[2];
-                    chunk[0] = r;
-                    chunk[2] = b;
-                    chunk[3] = 255;
-                }
-                return Some(ImageBuffer {
-                    width: w as u32,
-                    height: h as u32,
-                    pixels: raw_pixels,
-                });
+        // 0.8ms screen grab — NEVER calls PrintWindow on active foreground window!
+        // Captures the exact screen at 1:1 pixel exactness!
+        if is_fg && !is_iconic {
+            if let Some(buf) = grab_screen_rect(wx, wy, ww, wh) {
+                return Some(buf);
             }
         }
 
-        // 2. PrintWindow (PW_RENDERFULLCONTENT = 2)
+        // 2. Background window: PrintWindow (PW_RENDERFULLCONTENT = 2)
         if windows::Win32::UI::WindowsAndMessaging::IsHungAppWindow(hwnd).as_bool() {
             let title = get_window_title_safe(hwnd);
             return Some(create_placeholder(&title, w.max(320) as u32, h.max(200) as u32));
@@ -593,7 +680,6 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
                 let _ = ReleaseDC(hwnd, hdc_window);
 
                 if lines > 0 {
-                    // Check if it's completely black
                     let mut non_black = false;
                     for chunk in raw_pixels.chunks_exact_mut(4) {
                         let b = chunk[0];
@@ -608,11 +694,24 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
                     }
 
                     if non_black {
-                        return Some(ImageBuffer {
+                        let raw_buf = ImageBuffer {
                             width: w as u32,
                             height: h as u32,
                             pixels: raw_pixels,
-                        });
+                        };
+
+                        if is_maximized {
+                            if (w as u32) >= ww as u32 && (h as u32) >= wh as u32 {
+                                let crop_x = ((w as u32 - ww as u32) / 2).min(16);
+                                let crop_y = ((h as u32 - wh as u32) / 2).min(16);
+                                return Some(crop_inner(&raw_buf, crop_x, crop_y, ww as u32, wh as u32));
+                            }
+                            return Some(raw_buf);
+                        } else {
+                            let dx = rect.left - wx;
+                            let dy = rect.top - wy;
+                            return Some(compose_over_backdrop(&raw_buf, dx, dy, ww as u32, wh as u32));
+                        }
                     }
                 }
             } else {
@@ -628,7 +727,8 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
     }
 }
 
-/// Capture multiple windows in parallel using a thread pool
+/// Capture multiple windows in parallel using detached worker threads and a strict deadline.
+/// Pumping messages during wait guarantees the application NEVER freezes or shows "Not Responding".
 pub fn capture_windows_parallel(hwnds: &[HWND]) -> Vec<Option<ImageBuffer>> {
     let mut results = vec![None; hwnds.len()];
     let mut missing_indices = Vec::new();
@@ -652,29 +752,40 @@ pub fn capture_windows_parallel(hwnds: &[HWND]) -> Vec<Option<ImageBuffer>> {
         return results;
     }
 
-    let raw_hwnds: Vec<usize> = hwnds.iter().map(|h| h.0 as usize).collect();
+    let (tx, rx) = crossbeam_channel::unbounded::<(usize, Option<ImageBuffer>)>();
+    for &idx in &missing_indices {
+        let hwnd_raw = hwnds[idx].0 as usize;
+        let tx_c = tx.clone();
+        thread::spawn(move || {
+            let hwnd = HWND(hwnd_raw as *mut _);
+            let img = capture_window_image_uncached(hwnd);
+            let _ = tx_c.send((idx, img));
+        });
+    }
+    drop(tx);
 
-    // Concurrently capture missing windows
-    thread::scope(|s| {
-        let mut handles = Vec::new();
-        for &idx in &missing_indices {
-            let h_val = raw_hwnds[idx];
-            let handle = s.spawn(move || {
-                let hwnd = HWND(h_val as *mut _);
-                (idx, capture_window_image_uncached(hwnd))
-            });
-            handles.push(handle);
+    let deadline = Instant::now() + Duration::from_millis(180);
+    while let Ok((idx, opt_img)) = rx.recv_deadline(deadline) {
+        if let Some(ref buf) = opt_img {
+            FRAME_CACHE.lock().insert(hwnds[idx].0 as isize, (Instant::now(), buf.clone()));
         }
+        results[idx] = opt_img;
 
-        for handle in handles {
-            if let Ok((idx, img)) = handle.join() {
-                if let Some(ref buf) = img {
-                    FRAME_CACHE.lock().insert(hwnds[idx].0 as isize, (Instant::now(), buf.clone()));
-                }
-                results[idx] = img;
+        unsafe {
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
         }
-    });
+    }
+
+    for &idx in &missing_indices {
+        if results[idx].is_none() {
+            let title = get_window_title_safe(hwnds[idx]);
+            results[idx] = Some(create_placeholder(&title, 480, 300));
+        }
+    }
 
     results
 }

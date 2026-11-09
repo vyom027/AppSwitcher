@@ -82,19 +82,45 @@ unsafe extern "system" fn settings_wnd_proc(
                 return LRESULT(1);
             }
             WM_LBUTTONDOWN => {
-                let mut pt = POINT::default();
-                let _ = GetCursorPos(&mut pt);
-                let _ = ScreenToClient(hwnd, &mut pt);
+                // Client coordinates from l_param (standard Win32 mouse/touch extraction)
+                let lx = (l_param.0 & 0xFFFF) as i16 as f32;
+                let ly = ((l_param.0 >> 16) & 0xFFFF) as i16 as f32;
 
-                let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as f32;
-                let scale = dpi / 96.0;
+                let (x, y) = if lx >= 0.0 && ly >= 0.0 {
+                    (lx, ly)
+                } else {
+                    let mut pt = POINT::default();
+                    let _ = GetCursorPos(&mut pt);
+                    let _ = ScreenToClient(hwnd, &mut pt);
+                    (pt.x as f32, pt.y as f32)
+                };
 
-                let x = pt.x as f32 / scale;
-                let y = pt.y as f32 / scale;
-
+                // D2D renders in 1:1 physical client pixels — DO NOT divide by DPI scale!
                 dlg.handle_click(x, y);
                 dlg.render();
                 let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW);
+                return LRESULT(0);
+            }
+            0x0246 => { // WM_POINTERDOWN (direct Windows Touch Contact)
+                let mut pt = POINT {
+                    x: (l_param.0 & 0xFFFF) as i16 as i32,
+                    y: ((l_param.0 >> 16) & 0xFFFF) as i16 as i32,
+                };
+                let _ = ScreenToClient(hwnd, &mut pt);
+                dlg.handle_click(pt.x as f32, pt.y as f32);
+                dlg.render();
+                let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW);
+                return LRESULT(0);
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_SIZE => {
+                let w = (l_param.0 & 0xFFFF) as u32;
+                let h = ((l_param.0 >> 16) & 0xFFFF) as u32;
+                if w > 0 && h > 0 {
+                    dlg.width = w;
+                    dlg.height = h;
+                    let _ = dlg.d2d.resize(w, h);
+                    dlg.render();
+                }
                 return LRESULT(0);
             }
             WM_CLOSE => {
@@ -190,9 +216,9 @@ impl SettingsDialog {
     }
 
     fn handle_click(&mut self, x: f32, y: f32) {
-        // 1. Sidebar tab clicks
-        if x < 210.0 && y >= 60.0 {
-            let tab = ((y - 60.0) / 48.0) as usize;
+        // 1. Sidebar tab clicks (generous touch hitbox)
+        if x < 220.0 && y >= 55.0 && y <= 310.0 {
+            let tab = ((y - 55.0) / 48.0) as usize;
             if tab < 5 {
                 self.active_tab = tab;
                 self.status_msg.clear();
@@ -200,11 +226,11 @@ impl SettingsDialog {
             return;
         }
 
-        // Bottom Action Buttons
-        let btn_y = self.height as f32 - 58.0;
+        // Bottom Action Buttons (generous hit testing)
+        let btn_y = self.height as f32 - 68.0;
 
-        // Preview button: x 440..600
-        if y >= btn_y - 6.0 && y <= self.height as f32 && x >= 440.0 && x <= 600.0 {
+        // Preview button: x 430..610, y btn_y..height
+        if y >= btn_y && y <= self.height as f32 - 10.0 && x >= 430.0 && x <= 610.0 {
             if self.active_tab == 0 {
                 let _ = self.event_tx.send(AppEvent::Swipe(1));
             } else {
@@ -222,8 +248,8 @@ impl SettingsDialog {
             return;
         }
 
-        // Save button: x >= width - 170
-        if y >= btn_y - 6.0 && y <= self.height as f32 && x >= self.width as f32 - 170.0 {
+        // Save button: x >= width - 175, y btn_y..height
+        if y >= btn_y && y <= self.height as f32 - 10.0 && x >= self.width as f32 - 175.0 && x <= self.width as f32 - 15.0 {
             let cfg = self.settings.read().clone();
             if cfg.save().is_ok() {
                 self.status_msg = "Saved successfully!".to_string();
@@ -237,10 +263,10 @@ impl SettingsDialog {
         match self.active_tab {
             0 => {
                 // Motion & Speed Tab:
-                // Animation selection: 2 rows of 4 pills at y = 135..215
-                if y >= 135.0 && y <= 215.0 && x >= 250.0 {
-                    let row = if y >= 175.0 { 1 } else { 0 };
-                    let col = ((x - 250.0) / 135.0) as usize;
+                // Animation selection: 2 rows of 4 pills at y = 125..215
+                if y >= 125.0 && y <= 215.0 && x >= 245.0 && x <= 800.0 {
+                    let row = if y >= 170.0 { 1 } else { 0 };
+                    let col = ((x - 245.0) / 135.0) as usize;
                     let idx = row * 4 + col;
                     if idx < ANIM_NAMES.len() && col < 4 {
                         let selected_anim = ANIM_NAMES[idx].to_string();
@@ -249,20 +275,20 @@ impl SettingsDialog {
                         self.status_msg = format!("Animation set to {}", selected_anim);
                     }
                 }
-                // Duration presets: y = 255..290
-                if y >= 255.0 && y <= 290.0 && x >= 250.0 {
+                // Duration presets: y = 245..295
+                if y >= 245.0 && y <= 295.0 && x >= 245.0 && x <= 760.0 {
                     let presets = [0.14, 0.22, 0.32, 0.45];
-                    let col = ((x - 250.0) / 125.0) as usize;
+                    let col = ((x - 245.0) / 125.0) as usize;
                     if col < presets.len() {
                         self.settings.write().duration = presets[col];
                         let _ = self.settings.read().save();
                         self.status_msg = format!("Duration set to {}s", presets[col]);
                     }
                 }
-                // Sensitivity presets: y = 340..375
-                if y >= 340.0 && y <= 375.0 && x >= 250.0 {
+                // Sensitivity presets: y = 330..380
+                if y >= 330.0 && y <= 380.0 && x >= 245.0 && x <= 670.0 {
                     let sens = [160, 220, 300];
-                    let col = ((x - 250.0) / 135.0) as usize;
+                    let col = ((x - 245.0) / 135.0) as usize;
                     if col < sens.len() {
                         self.settings.write().sensitivity = sens[col];
                         let _ = self.settings.read().save();
@@ -271,9 +297,10 @@ impl SettingsDialog {
                 }
             }
             1 => {
-                // Layouts Tab: 7 cards in 2 columns
-                if x >= 250.0 && x <= 790.0 && y >= 130.0 {
-                    let row = ((y - 130.0) / 52.0) as usize;
+                // Layouts Tab: 7 selectable layout cards
+                // rendered at y = 130.0 + i * 52.0 (height 44.0)
+                if x >= 240.0 && x <= 810.0 && y >= 120.0 {
+                    let row = ((y - 120.0) / 52.0) as usize;
                     if row < LAYOUT_NAMES.len() {
                         let selected_layout = LAYOUT_NAMES[row].0.to_string();
                         self.settings.write().layout = selected_layout.clone();
@@ -284,15 +311,15 @@ impl SettingsDialog {
             }
             2 => {
                 // Hotkeys Tab:
-                // Alt vs Ctrl toggle: y = 150..185
-                if y >= 150.0 && y <= 185.0 && x >= 250.0 && x <= 460.0 {
+                // Alt vs Ctrl toggle: y = 145..190
+                if y >= 145.0 && y <= 190.0 && x >= 245.0 && x <= 470.0 {
                     let is_ctrl = x >= 355.0;
                     self.settings.write().hotkey_mod = if is_ctrl { "ctrl".to_string() } else { "alt".to_string() };
                     let _ = self.settings.read().save();
                     self.status_msg = format!("Hotkey set to {}", if is_ctrl { "Ctrl+Tab" } else { "Alt+Tab" });
                 }
-                // Pinch toggle: y = 240..275
-                if y >= 240.0 && y <= 275.0 && x >= 250.0 && x <= 420.0 {
+                // Pinch toggle: y = 235..280
+                if y >= 235.0 && y <= 280.0 && x >= 245.0 && x <= 430.0 {
                     let cur = self.settings.read().pinch_enabled;
                     self.settings.write().pinch_enabled = !cur;
                     let _ = self.settings.read().save();
@@ -300,9 +327,9 @@ impl SettingsDialog {
                 }
             }
             3 => {
-                // Appearance Tab: 8 Accent Color Circles at y = 160..210
-                if y >= 150.0 && y <= 210.0 && x >= 250.0 {
-                    let idx = ((x - 250.0) / 65.0) as usize;
+                // Appearance Tab: 8 Accent Color Circles at y = 150..220
+                if y >= 150.0 && y <= 220.0 && x >= 240.0 {
+                    let idx = ((x - 240.0) / 65.0) as usize;
                     if idx < ACCENT_PRESETS.len() {
                         self.settings.write().accent = ACCENT_PRESETS[idx].1;
                         let _ = self.settings.read().save();

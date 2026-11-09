@@ -62,6 +62,8 @@ pub fn bring_to_front(hwnd: HWND) {
     invalidate_window_cache();
 
     unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(0xFFFFFFFF);
+
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
@@ -70,8 +72,9 @@ pub fn bring_to_front(hwnd: HWND) {
         let cur_thread = GetCurrentThreadId();
         let fg_thread = GetWindowThreadProcessId(fg, None);
 
+        let is_fg_hung = windows::Win32::UI::WindowsAndMessaging::IsHungAppWindow(fg).as_bool();
         let mut attached = false;
-        if fg_thread != 0 && fg_thread != cur_thread {
+        if !is_fg_hung && fg_thread != 0 && fg_thread != cur_thread {
             attached = AttachThreadInput(fg_thread, cur_thread, true).as_bool();
         }
 
