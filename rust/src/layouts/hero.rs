@@ -357,7 +357,8 @@ impl PickerLayout for HeroLayout {
         }
     }
 
-    fn hit_test(&self, px: f32, py: f32, count: usize, sw: f32, sh: f32) -> Option<usize> {
+    fn hit_test(&self, px: f32, py: f32, windows: &[WindowInfo], sw: f32, sh: f32) -> Option<usize> {
+        let count = windows.len();
         let film_y = sh - 36.0 - self.film_h;
         let film_stride = self.film_w + self.gap;
         let ox = sw * 0.5 - (self.focus * film_stride) - (self.film_w * 0.5);

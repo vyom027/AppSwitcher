@@ -1,7 +1,7 @@
 use crate::event::{AppEvent, WM_APP_EVENT};
 use crossbeam_channel::Sender;
 use std::mem::size_of;
-use windows::core::w;
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
@@ -9,7 +9,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    GetCursorPos, PostMessageW, RegisterClassExW, SetForegroundWindow, TrackPopupMenuEx,
+    GetCursorPos, LoadIconW, PostMessageW, RegisterClassExW, SetForegroundWindow, TrackPopupMenuEx,
     MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN, TPM_LEFTALIGN, WINDOW_EX_STYLE, WINDOW_STYLE,
     WM_COMMAND, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_USER, WNDCLASSEXW,
 };
@@ -82,7 +82,10 @@ fn dispatch_tray_event(event: AppEvent) {
 }
 
 impl TrayIcon {
-    pub fn new(event_sender: Sender<AppEvent>, ui_hwnd: HWND) -> Result<Self, windows::core::Error> {
+    pub fn new(
+        event_sender: Sender<AppEvent>,
+        ui_hwnd: HWND,
+    ) -> Result<Self, windows::core::Error> {
         *TRAY_EVENT_SENDER.write() = Some(event_sender);
         TRAY_TARGET_HWND.store(ui_hwnd.0 as usize, std::sync::atomic::Ordering::SeqCst);
 
@@ -95,6 +98,8 @@ impl TrayIcon {
             wc.lpfnWndProc = Some(tray_window_proc);
             wc.hInstance = h_instance.into();
             wc.lpszClassName = class_name;
+            wc.hIcon = LoadIconW(h_instance, PCWSTR(1 as *const u16)).unwrap_or_default();
+            wc.hIconSm = wc.hIcon;
 
             let _ = RegisterClassExW(&wc);
 
@@ -116,6 +121,7 @@ impl TrayIcon {
             let mut nid = NOTIFYICONDATAW::default();
             nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
             nid.hWnd = hwnd;
+            nid.hIcon = wc.hIcon;
             nid.uID = 1;
             nid.uFlags = NOTIFY_ICON_DATA_FLAGS(1 | 2 | 4); // NIF_MESSAGE | NIF_ICON | NIF_TIP
             nid.uCallbackMessage = WM_TRAYICON;

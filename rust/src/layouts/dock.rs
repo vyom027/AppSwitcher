@@ -385,7 +385,8 @@ impl PickerLayout for DockLayout {
         }
     }
 
-    fn hit_test(&self, px: f32, py: f32, count: usize, sw: f32, sh: f32) -> Option<usize> {
+    fn hit_test(&self, px: f32, py: f32, windows: &[WindowInfo], sw: f32, sh: f32) -> Option<usize> {
+        let count = windows.len();
         let base_y = sh - 36.0;
         let mut widths = Vec::with_capacity(count);
         let mut total_w = 0.0;

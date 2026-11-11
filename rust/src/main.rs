@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod animations;
 mod config;
 mod event;
@@ -15,11 +17,13 @@ use std::sync::Arc;
 use std::thread;
 use ui::{OverlayWindow, PickerMode, SettingsDialog, TrayIcon};
 use window::{
-    bring_to_front, capture_window_image, create_placeholder, get_open_windows, nudge_cursor,
-    sort_by_mru, start_mru_watcher, enumerator::WindowInfo, capture::ImageBuffer,
+    bring_to_front, capture::ImageBuffer, capture_window_image, enumerator::WindowInfo,
+    get_open_windows, nudge_cursor, sort_by_mru, start_mru_watcher,
 };
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, WPARAM, LPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, WPARAM,
+};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 use windows::Win32::System::Threading::{
     CreateEventW, CreateMutexW, SetEvent, WaitForSingleObject, INFINITE,
@@ -28,7 +32,7 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_MENU,
+    keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_MENU,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DisableProcessWindowsGhosting, DispatchMessageW, GetMessageW, PeekMessageW, PostMessageW,
@@ -114,7 +118,7 @@ fn commit_window_switch(
 
     if let (Some(c), Some(n)) = (curr_img, next_img) {
         let dir = if sel == 1 { 1 } else { -1 };
-        overlay.run_switch_transition(dir, &c, &n, target_hwnd, anim_kind, duration);
+        overlay.run_switch_transition(dir, &c, &n, target_hwnd, anim_kind, duration, true);
     } else {
         bring_to_front(target_hwnd);
         nudge_cursor();
@@ -185,7 +189,7 @@ fn main() {
         }
     };
 
-    let settings_dialog = match SettingsDialog::new(
+    let mut settings_dialog = match SettingsDialog::new(
         Arc::clone(&settings),
         event_tx.clone(),
         overlay.hwnd.0 as usize,
@@ -206,9 +210,15 @@ fn main() {
     thread::spawn(move || unsafe {
         if let Ok(event) = CreateEventW(None, false, false, SHOW_SETTINGS_EVENT) {
             loop {
-                if WaitForSingleObject(event, INFINITE) == windows::Win32::Foundation::WAIT_OBJECT_0 {
+                if WaitForSingleObject(event, INFINITE) == windows::Win32::Foundation::WAIT_OBJECT_0
+                {
                     let _ = tx_sig.send(AppEvent::ShowSettings);
-                    let _ = PostMessageW(HWND(ov_hwnd_usize as *mut _), WM_APP_EVENT, WPARAM(0), LPARAM(0));
+                    let _ = PostMessageW(
+                        HWND(ov_hwnd_usize as *mut _),
+                        WM_APP_EVENT,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
                 }
             }
         }
@@ -216,12 +226,19 @@ fn main() {
 
     // 9. Start dedicated Background Input Thread (Pumps RawInput & Keyboard Hook)
     let tx_input = event_tx.clone();
-    let (use_ctrl, trigger_vk) = {
+    let (use_ctrl, trigger_vk, sensitivity, alt_tab_enabled) = {
         let cfg = settings.read();
-        (cfg.hotkey_mod.eq_ignore_ascii_case("ctrl"), cfg.hotkey_key)
+        (
+            cfg.hotkey_mod.eq_ignore_ascii_case("ctrl"),
+            cfg.hotkey_key,
+            cfg.sensitivity,
+            cfg.alt_tab,
+        )
     };
+    crate::input::keyboard_hook::set_enabled(alt_tab_enabled);
     thread::spawn(move || {
-        if let Err(e) = run_input_thread(tx_input, ov_hwnd_usize, use_ctrl, trigger_vk) {
+        if let Err(e) = run_input_thread(tx_input, ov_hwnd_usize, use_ctrl, trigger_vk, sensitivity)
+        {
             eprintln!("[error] Background input thread terminated: {:?}", e);
         }
     });
@@ -231,7 +248,12 @@ fn main() {
     ctrlc_handler(move || {
         let _ = tx_ctrlc.send(AppEvent::Quit);
         unsafe {
-            let _ = PostMessageW(HWND(ov_hwnd_usize as *mut _), WM_APP_EVENT, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(
+                HWND(ov_hwnd_usize as *mut _),
+                WM_APP_EVENT,
+                WPARAM(0),
+                LPARAM(0),
+            );
         }
     });
 
@@ -263,7 +285,8 @@ fn main() {
                                 let mut quick_tap = false;
                                 let wait_start = std::time::Instant::now();
                                 while wait_start.elapsed() < std::time::Duration::from_millis(100) {
-                                    let is_mod_down = (GetAsyncKeyState(mod_vk.0 as i32) as u16 & 0x8000) != 0;
+                                    let is_mod_down =
+                                        (GetAsyncKeyState(mod_vk.0 as i32) as u16 & 0x8000) != 0;
                                     if !is_mod_down {
                                         quick_tap = true;
                                         break;
@@ -288,7 +311,9 @@ fn main() {
                                 }
 
                                 if quick_tap {
-                                    commit_window_switch(&overlay, &settings, &mru, start_idx, None, None);
+                                    commit_window_switch(
+                                        &overlay, &settings, &mru, start_idx, None, None,
+                                    );
                                     continue;
                                 }
 
@@ -308,7 +333,71 @@ fn main() {
                                     sensitivity,
                                     &event_rx,
                                 ) {
-                                    commit_window_switch(&overlay, &settings, &mru, sel, c_img, n_img);
+                                    commit_window_switch(
+                                        &overlay, &settings, &mru, sel, c_img, n_img,
+                                    );
+                                }
+                            }
+                        }
+                        AppEvent::PreviewPicker => {
+                            let (blocklist, layout_name, accent_rgb, use_ctrl, sensitivity) = {
+                                let cfg = settings.read();
+                                (
+                                    cfg.blocklist.clone(),
+                                    cfg.layout.clone(),
+                                    cfg.accent,
+                                    cfg.hotkey_mod.eq_ignore_ascii_case("ctrl"),
+                                    cfg.sensitivity as f32,
+                                )
+                            };
+                            let mru = sort_by_mru(get_open_windows(&blocklist, false));
+                            if mru.len() >= 2 {
+                                let accent = D2D1_COLOR_F {
+                                    r: accent_rgb[0] as f32 / 255.0,
+                                    g: accent_rgb[1] as f32 / 255.0,
+                                    b: accent_rgb[2] as f32 / 255.0,
+                                    a: 1.0,
+                                };
+                                if let Some((sel, c_img, n_img)) = overlay.run_picker(
+                                    &mru,
+                                    0,
+                                    &layout_name,
+                                    accent,
+                                    PickerMode::Preview,
+                                    use_ctrl,
+                                    sensitivity,
+                                    &event_rx,
+                                ) {
+                                    commit_window_switch(
+                                        &overlay, &settings, &mru, sel, c_img, n_img,
+                                    );
+                                }
+                            }
+                        }
+                        AppEvent::PreviewAnimation => {
+                            let (blocklist, animation, duration) = {
+                                let cfg = settings.read();
+                                (
+                                    cfg.blocklist.clone(),
+                                    cfg.animation.clone(),
+                                    cfg.duration as f32,
+                                )
+                            };
+                            let mru = sort_by_mru(get_open_windows(&blocklist, false));
+                            if mru.len() >= 2 {
+                                if let (Some(curr), Some(next)) = (
+                                    capture_window_image(mru[0].hwnd),
+                                    capture_window_image(mru[1].hwnd),
+                                ) {
+                                    overlay.run_switch_transition(
+                                        1,
+                                        &curr,
+                                        &next,
+                                        mru[1].hwnd,
+                                        TransitionKind::from_str(&animation),
+                                        duration,
+                                        false,
+                                    );
                                 }
                             }
                         }
@@ -341,7 +430,9 @@ fn main() {
                                     sensitivity,
                                     &event_rx,
                                 ) {
-                                    commit_window_switch(&overlay, &settings, &mru, sel, c_img, n_img);
+                                    commit_window_switch(
+                                        &overlay, &settings, &mru, sel, c_img, n_img,
+                                    );
                                 }
                             }
                         }
@@ -349,49 +440,55 @@ fn main() {
                             if IS_BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
                                 continue;
                             }
+                            struct BusyGuard;
+                            impl Drop for BusyGuard {
+                                fn drop(&mut self) {
+                                    IS_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+                                }
+                            }
+                            let _busy = BusyGuard;
+
                             let (blocklist, anim_name, duration) = {
                                 let cfg = settings.read();
-                                (cfg.blocklist.clone(), cfg.animation.clone(), cfg.duration as f32)
+                                (
+                                    cfg.blocklist.clone(),
+                                    cfg.animation.clone(),
+                                    cfg.duration as f32,
+                                )
                             };
                             let mru = sort_by_mru(get_open_windows(&blocklist, false));
+                            if mru.len() < 2 {
+                                // Exactly 1 window or none: no switch, zero change
+                                continue;
+                            }
+
                             let anim_kind = TransitionKind::from_str(&anim_name);
-                            if mru.len() >= 2 {
-                                let target_idx = if direction > 0 { 1 } else { mru.len() - 1 };
-                                let curr_hwnd = mru[0].hwnd;
-                                let target_hwnd = mru[target_idx].hwnd;
+                            let target_idx = if direction > 0 { 1 } else { mru.len() - 1 };
+                            let curr_hwnd = mru[0].hwnd;
+                            let target_hwnd = mru[target_idx].hwnd;
 
-                                let curr_img = capture_window_image(curr_hwnd);
-                                let next_img = capture_window_image(target_hwnd);
+                            let curr_img = capture_window_image(curr_hwnd);
+                            let next_img = capture_window_image(target_hwnd);
 
-                                if let (Some(c), Some(n)) = (curr_img, next_img) {
-                                    overlay.run_switch_transition(
-                                        direction,
-                                        &c,
-                                        &n,
-                                        target_hwnd,
-                                        anim_kind,
-                                        duration,
-                                    );
-                                } else {
-                                    bring_to_front(target_hwnd);
-                                    nudge_cursor();
-                                }
-                            } else {
-                                // Fallback for preview/testing with fewer than 2 apps
-                                let c = create_placeholder("App 1 (Demo)", 640, 420);
-                                let n = create_placeholder("App 2 (Demo)", 640, 420);
+                            if let (Some(c), Some(n)) = (curr_img, next_img) {
                                 overlay.run_switch_transition(
                                     direction,
                                     &c,
                                     &n,
-                                    HWND(std::ptr::null_mut()),
+                                    target_hwnd,
                                     anim_kind,
                                     duration,
+                                    true,
                                 );
+                            } else {
+                                bring_to_front(target_hwnd);
+                                nudge_cursor();
                             }
-                            // Drain any excess swipe events that arrived during animation
-                            while let Ok(AppEvent::Swipe(_)) = event_rx.try_recv() {}
-                            IS_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+
+                            // The transition loop drains Windows notifications to
+                            // stay responsive. Keep channel events intact here:
+                            // matching only Swipe used to consume and discard the
+                            // first non-swipe event (including Quit/settings).
                         }
                         AppEvent::Pinch => {
                             let cfg = settings.read();
@@ -421,11 +518,8 @@ fn main() {
 fn ctrlc_handler<F: Fn() + Send + Sync + 'static>(handler: F) {
     let handler = Arc::new(handler);
     unsafe {
-        windows::Win32::System::Console::SetConsoleCtrlHandler(
-            Some(console_ctrl_handler),
-            true,
-        )
-        .ok();
+        windows::Win32::System::Console::SetConsoleCtrlHandler(Some(console_ctrl_handler), true)
+            .ok();
     }
     *CTRL_HANDLER.lock() = Some(handler);
 }
@@ -433,7 +527,9 @@ fn ctrlc_handler<F: Fn() + Send + Sync + 'static>(handler: F) {
 static CTRL_HANDLER: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>> =
     parking_lot::Mutex::new(None);
 
-unsafe extern "system" fn console_ctrl_handler(dw_ctrl_type: u32) -> windows::Win32::Foundation::BOOL {
+unsafe extern "system" fn console_ctrl_handler(
+    dw_ctrl_type: u32,
+) -> windows::Win32::Foundation::BOOL {
     if dw_ctrl_type == windows::Win32::System::Console::CTRL_C_EVENT {
         if let Some(ref h) = *CTRL_HANDLER.lock() {
             h();

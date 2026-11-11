@@ -1,18 +1,14 @@
 use crate::animations::TransitionKind;
 use crate::event::{AppEvent, WM_APP_EVENT};
-use crate::layouts::coverflow::CoverflowLayout;
 use crate::layouts::dock::DockLayout;
-use crate::layouts::fan::FanLayout;
-use crate::layouts::grid::GridLayout;
+use crate::layouts::expose_cloud::ExposeCloudLayout;
 use crate::layouts::hero::HeroLayout;
 use crate::layouts::row::RowLayout;
-use crate::layouts::wallet::WalletLayout;
-use crate::layouts::PickerLayout;
+use crate::layouts::spotlight::SpotlightLayout;
+use crate::layouts::{draw_liquid_glass, PickerLayout};
 use crate::render::d2d::D2DContext;
 use crate::render::spring::{Spring, SpringConfig};
-use crate::window::capture::{
-    capture_windows_parallel, get_backdrop, work_area, ImageBuffer,
-};
+use crate::window::capture::{capture_windows_parallel, get_backdrop, work_area, ImageBuffer};
 use crate::window::enumerator::WindowInfo;
 use crate::window::foreground::{bring_to_front, nudge_cursor};
 use crossbeam_channel::Receiver;
@@ -23,7 +19,10 @@ use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
-use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
+use windows::Win32::Graphics::Dwm::{
+    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWINDOWATTRIBUTE,
+};
+use windows::Win32::Graphics::Gdi::{GetStockObject, BLACK_BRUSH, HBRUSH};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -31,15 +30,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, PeekMessageW, PostMessageW,
-    RegisterClassExW, SetWindowPos, ShowWindow, TranslateMessage, HWND_TOPMOST, MSG, PM_REMOVE,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW, WM_CLOSE, WM_QUIT, WNDCLASSEXW,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    RegisterClassExW, SetWindowPos, TranslateMessage, HWND_TOPMOST, MSG, PM_REMOVE, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, WM_CLOSE, WM_QUIT, WNDCLASSEXW, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerMode {
     AltTab,
     Touchpad,
+    Preview,
 }
 
 pub struct OverlayWindow {
@@ -70,6 +70,32 @@ unsafe extern "system" fn overlay_wnd_proc(
     }
 }
 
+struct OverlayGuard<'a>(&'a OverlayWindow);
+impl<'a> Drop for OverlayGuard<'a> {
+    fn drop(&mut self) {
+        self.0.hide();
+    }
+}
+
+struct SearchModeGuard;
+impl Drop for SearchModeGuard {
+    fn drop(&mut self) {
+        crate::input::keyboard_hook::set_search_mode(false);
+    }
+}
+
+fn move_within(candidates: &[usize], selected: usize, direction: i32) -> (usize, usize) {
+    if candidates.is_empty() {
+        return (selected, 0);
+    }
+    let current = candidates
+        .iter()
+        .position(|&idx| idx == selected)
+        .unwrap_or(0);
+    let next = (current as i32 + direction).rem_euclid(candidates.len() as i32) as usize;
+    (candidates[next], next)
+}
+
 impl OverlayWindow {
     pub fn new() -> Result<Self, windows::core::Error> {
         let (wx, wy, ww, wh) = work_area();
@@ -85,6 +111,7 @@ impl OverlayWindow {
             wc.lpfnWndProc = Some(overlay_wnd_proc);
             wc.hInstance = h_instance.into();
             wc.lpszClassName = class_name;
+            wc.hbrBackground = HBRUSH(GetStockObject(BLACK_BRUSH).0);
 
             let _ = RegisterClassExW(&wc);
 
@@ -106,7 +133,16 @@ impl OverlayWindow {
                 None,
             )?;
 
-            // 1. Extend DWM frame into client area
+            // 1. Dark mode DWM frame and immersion attributes (Eliminates white flashes)
+            let dark_mode = windows::Win32::Foundation::BOOL(1);
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWINDOWATTRIBUTE(20),
+                &dark_mode as *const _ as *const _,
+                size_of::<windows::Win32::Foundation::BOOL>() as u32,
+            );
+
+            // 2. Extend DWM frame into client area
             let margins = MARGINS {
                 cxLeftWidth: -1,
                 cxRightWidth: -1,
@@ -132,15 +168,7 @@ impl OverlayWindow {
         let wh_u = wh.max(100) as u32;
 
         unsafe {
-            let _ = SetWindowPos(
-                self.hwnd,
-                HWND_TOPMOST,
-                wx,
-                wy,
-                ww,
-                wh,
-                SWP_NOACTIVATE,
-            );
+            let _ = SetWindowPos(self.hwnd, HWND_TOPMOST, wx, wy, ww, wh, SWP_NOACTIVATE);
         }
 
         let old_w = self.width.swap(ww_u, std::sync::atomic::Ordering::SeqCst);
@@ -153,8 +181,18 @@ impl OverlayWindow {
         (ww as f32, wh as f32)
     }
 
-    pub fn show(&self) {
+    pub fn show(&self, clickable: bool) {
+        crate::window::capture::OVERLAY_VISIBLE.store(true, std::sync::atomic::Ordering::SeqCst);
         unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                SetWindowLongW, ShowWindow, GWL_EXSTYLE, SW_SHOWNA, WS_EX_TOOLWINDOW,
+                WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+            };
+            let mut ex = (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) as i32;
+            if !clickable {
+                ex |= WS_EX_TRANSPARENT.0 as i32;
+            }
+            let _ = SetWindowLongW(self.hwnd, GWL_EXSTYLE, ex);
             let _ = SetWindowPos(
                 self.hwnd,
                 HWND_TOPMOST,
@@ -162,14 +200,16 @@ impl OverlayWindow {
                 0,
                 0,
                 0,
-                SWP_NOMOVE | SWP_NOSIZE,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE,
             );
-            let _ = ShowWindow(self.hwnd, SW_SHOW);
+            let _ = ShowWindow(self.hwnd, SW_SHOWNA);
         }
     }
 
     pub fn hide(&self) {
+        crate::window::capture::OVERLAY_VISIBLE.store(false, std::sync::atomic::Ordering::SeqCst);
         unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
     }
@@ -183,7 +223,9 @@ impl OverlayWindow {
         next_hwnd: HWND,
         anim_kind: TransitionKind,
         duration_secs: f32,
+        commit_focus: bool,
     ) {
+        let _guard = OverlayGuard(self);
         let (sw, sh) = self.sync_work_area();
 
         // 1. Capture backdrop and create bitmaps BEFORE revealing the window!
@@ -193,25 +235,31 @@ impl OverlayWindow {
             .create_bitmap_from_rgba(bg.width, bg.height, &bg.pixels)
             .ok();
 
-        let curr_bmp = match self
-            .d2d
-            .create_bitmap_from_rgba(curr_img.width, curr_img.height, &curr_img.pixels)
-        {
+        let curr_bmp = match self.d2d.create_bitmap_from_rgba(
+            curr_img.width,
+            curr_img.height,
+            &curr_img.pixels,
+        ) {
             Ok(b) => b,
             Err(_) => {
-                bring_to_front(next_hwnd);
+                if commit_focus {
+                    bring_to_front(next_hwnd);
+                }
                 self.hide();
                 return;
             }
         };
 
-        let next_bmp = match self
-            .d2d
-            .create_bitmap_from_rgba(next_img.width, next_img.height, &next_img.pixels)
-        {
+        let next_bmp = match self.d2d.create_bitmap_from_rgba(
+            next_img.width,
+            next_img.height,
+            &next_img.pixels,
+        ) {
             Ok(b) => b,
             Err(_) => {
-                bring_to_front(next_hwnd);
+                if commit_focus {
+                    bring_to_front(next_hwnd);
+                }
                 self.hide();
                 return;
             }
@@ -233,29 +281,29 @@ impl OverlayWindow {
         } else {
             self.d2d.clear(0.04, 0.05, 0.08, 1.0);
         }
-        anim_kind.render(
-            &self.d2d,
-            &curr_bmp,
-            &next_bmp,
-            0.0,
-            direction,
-            sw,
-            sh,
-        );
+        anim_kind.render(&self.d2d, &curr_bmp, &next_bmp, 0.0, direction, sw, sh);
         let _ = self.d2d.end_draw();
 
-        // 3. Now reveal window cleanly
-        self.show();
+        // 3. Now reveal window cleanly (click-through during transitions)
+        self.show(false);
 
         let start_time = Instant::now();
         let target_duration = Duration::from_secs_f32(duration_secs.max(0.12));
+        let mut cancelled = false;
 
         // 120Hz/144Hz frame loop
         loop {
+            if unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000) != 0 } {
+                cancelled = true;
+                break;
+            }
             let elapsed = start_time.elapsed();
             let t = (elapsed.as_secs_f32() / target_duration.as_secs_f32()).min(1.0);
 
-            // Pump Windows messages to prevent "Not Responding" during rapid swipes
+            // Drain queued notifications while animating. Leaving WM_APP_EVENT at
+            // the head of the queue makes this loop spin without pumping paint,
+            // close, or input messages; the main loop is woken again after the
+            // transition completes.
             unsafe {
                 let mut msg = MSG::default();
                 while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
@@ -286,15 +334,7 @@ impl OverlayWindow {
             }
 
             // 2. Render animation
-            anim_kind.render(
-                &self.d2d,
-                &curr_bmp,
-                &next_bmp,
-                eased_t,
-                direction,
-                sw,
-                sh,
-            );
+            anim_kind.render(&self.d2d, &curr_bmp, &next_bmp, eased_t, direction, sw, sh);
 
             let _ = self.d2d.end_draw();
 
@@ -305,7 +345,9 @@ impl OverlayWindow {
             thread::sleep(Duration::from_millis(7)); // ~140 fps timing budget
         }
 
-        bring_to_front(next_hwnd);
+        if !cancelled && commit_focus {
+            bring_to_front(next_hwnd);
+        }
         // Allow target window to composite underneath overlay before hiding (eliminates 10ms white screen)
         thread::sleep(Duration::from_millis(20));
         unsafe {
@@ -316,17 +358,24 @@ impl OverlayWindow {
             }
         }
         self.hide();
+        // Some input can arrive after the last animation-frame drain. Ensure
+        // the outer event loop wakes even if its WM_APP_EVENT was just drained.
+        unsafe {
+            let _ = PostMessageW(self.hwnd, WM_APP_EVENT, WPARAM(0), LPARAM(0));
+        }
         nudge_cursor();
 
-        // Trigger background prewarm for follow-up switch
-        let wins = crate::window::get_open_windows(&[], false);
-        let mru = crate::window::sort_by_mru(wins);
-        if mru.len() > 1 {
-            let mut targets = vec![mru[0].hwnd, mru[1].hwnd];
-            if mru.len() > 2 {
-                targets.push(mru[mru.len() - 1].hwnd);
+        // Trigger background prewarm only after a real switch.
+        if commit_focus {
+            let wins = crate::window::get_open_windows(&[], false);
+            let mru = crate::window::sort_by_mru(wins);
+            if mru.len() > 1 {
+                let mut targets = vec![mru[0].hwnd, mru[1].hwnd];
+                if mru.len() > 2 {
+                    targets.push(mru[mru.len() - 1].hwnd);
+                }
+                crate::window::capture::prewarm_windows(&targets);
             }
-            crate::window::capture::prewarm_windows(&targets);
         }
     }
 
@@ -342,6 +391,7 @@ impl OverlayWindow {
         sensitivity: f32,
         event_rx: &Receiver<AppEvent>,
     ) -> Option<(usize, Option<ImageBuffer>, Option<ImageBuffer>)> {
+        let _guard = OverlayGuard(self);
         let n = windows.len();
         if n == 0 {
             return None;
@@ -350,12 +400,10 @@ impl OverlayWindow {
         let (sw, sh) = self.sync_work_area();
 
         let mut layout: Box<dyn PickerLayout> = match layout_name.to_lowercase().as_str() {
-            "grid" => Box::new(GridLayout::default()),
-            "coverflow" => Box::new(CoverflowLayout::default()),
             "row" => Box::new(RowLayout::default()),
             "hero" => Box::new(HeroLayout::default()),
-            "wallet" => Box::new(WalletLayout::default()),
-            "fan" => Box::new(FanLayout::default()),
+            "expose_cloud" => Box::new(ExposeCloudLayout::default()),
+            "spotlight" => Box::new(SpotlightLayout::default()),
             _ => Box::new(DockLayout::default()),
         };
 
@@ -381,25 +429,37 @@ impl OverlayWindow {
             })
             .collect();
 
-        // Live thumbnail background refresh worker (re-captures every ~500ms while picker is open)
-        let (live_tx, live_rx) = crossbeam_channel::unbounded::<(usize, ImageBuffer)>();
+        // Single, clean live thumbnail background refresh worker (updates every 2.5s matching Python)
+        let (refresh_tx, refresh_rx) = crossbeam_channel::unbounded::<(usize, ImageBuffer)>();
         let picker_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let bg_active = std::sync::Arc::clone(&picker_active);
         let bg_hwnds: Vec<usize> = hwnds.iter().map(|h| h.0 as usize).collect();
 
         thread::spawn(move || {
             while bg_active.load(std::sync::atomic::Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(500));
-                if !bg_active.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
+                // Sleep in 100ms intervals so thread exits promptly on picker close
+                for _ in 0..25 {
+                    thread::sleep(Duration::from_millis(100));
+                    if !bg_active.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
                 }
                 for (idx, &raw_h) in bg_hwnds.iter().enumerate() {
                     if !bg_active.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
+                        return;
                     }
                     let h = HWND(raw_h as *mut _);
-                    if let Some(img) = crate::window::capture::capture_window_image(h) {
-                        let _ = live_tx.send((idx, img));
+                    if let Some(img) = crate::window::capture::capture_window_image_uncached(h) {
+                        let mut has_color = false;
+                        for px in img.pixels.chunks_exact(16) {
+                            if px[0] > 15 || px[1] > 15 || px[2] > 15 {
+                                has_color = true;
+                                break;
+                            }
+                        }
+                        if has_color {
+                            let _ = refresh_tx.send((idx, img));
+                        }
                     }
                 }
             }
@@ -441,7 +501,11 @@ impl OverlayWindow {
                 )
             }
             PickerMode::Touchpad => {
-                "glide fingers to pick · lift to switch · Middle-click close · Esc cancel".to_string()
+                "glide fingers to pick · lift to switch · Middle-click close · Esc cancel"
+                    .to_string()
+            }
+            PickerMode::Preview => {
+                "Preview · click a window or press Enter to switch · Esc to close".to_string()
             }
         };
 
@@ -456,7 +520,16 @@ impl OverlayWindow {
             }
         }
 
-        self.show();
+        let is_spotlight = layout_name.eq_ignore_ascii_case("spotlight");
+        let _search_mode = if is_spotlight {
+            crate::input::keyboard_hook::set_search_mode(true);
+            Some(SearchModeGuard)
+        } else {
+            None
+        };
+        let mut search_query = String::new();
+
+        self.show(true);
         let show_start = Instant::now();
         let fade_dur = 0.12f32;
 
@@ -467,6 +540,7 @@ impl OverlayWindow {
             // 1. Process Windows Messages & Channel Events
             let mut msg = MSG::default();
             let mut should_exit = false;
+            let mut candidates = layout.visible_indices(windows);
 
             unsafe {
                 while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
@@ -478,18 +552,21 @@ impl OverlayWindow {
                         while let Ok(event) = event_rx.try_recv() {
                             match event {
                                 AppEvent::AltTab { direction } => {
-                                    selected = (selected as i32 + direction).rem_euclid(n as i32) as usize;
-                                    spring.set_target(selected as f64);
+                                    let (idx, position) =
+                                        move_within(&candidates, selected, direction);
+                                    selected = idx;
+                                    spring.set_target(position as f64);
                                 }
                                 AppEvent::AltTabRelease => {
                                     if mode == PickerMode::AltTab {
-                                        commit_selection = true;
+                                        commit_selection = !candidates.is_empty();
                                         should_exit = true;
                                     }
                                 }
                                 AppEvent::Swipe(dir) => {
-                                    selected = (selected as i32 + dir).rem_euclid(n as i32) as usize;
-                                    spring.set_target(selected as f64);
+                                    let (idx, position) = move_within(&candidates, selected, dir);
+                                    selected = idx;
+                                    spring.set_target(position as f64);
                                 }
                                 AppEvent::Quit => {
                                     self.hide();
@@ -508,17 +585,80 @@ impl OverlayWindow {
                 break;
             }
 
+            if is_spotlight {
+                let mut changed = false;
+                for input in crate::input::keyboard_hook::take_search_input() {
+                    match input {
+                        crate::input::keyboard_hook::SearchInput::Character(ch)
+                            if search_query.chars().count() < 64 =>
+                        {
+                            search_query.push(ch);
+                            changed = true;
+                        }
+                        crate::input::keyboard_hook::SearchInput::Backspace => {
+                            if search_query.pop().is_some() {
+                                changed = true;
+                            }
+                        }
+                        crate::input::keyboard_hook::SearchInput::Clear => {
+                            if !search_query.is_empty() {
+                                search_query.clear();
+                                changed = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if changed {
+                    layout.set_query(&search_query);
+                    candidates = layout.visible_indices(windows);
+                    let position = candidates
+                        .iter()
+                        .position(|&idx| idx == selected)
+                        .unwrap_or(0);
+                    if let Some(&idx) = candidates.get(position) {
+                        selected = idx;
+                    }
+                    spring.set_target(position as f64);
+                }
+            }
+
+            // Receive any background refreshed live frames (strictly guard against blank/black frames)
+            while let Ok((idx, img)) = refresh_rx.try_recv() {
+                let mut valid = false;
+                for px in img.pixels.chunks_exact(16) {
+                    if px[0] > 15 || px[1] > 15 || px[2] > 15 {
+                        valid = true;
+                        break;
+                    }
+                }
+                if valid {
+                    if let Ok(bmp) =
+                        self.d2d
+                            .create_bitmap_from_rgba(img.width, img.height, &img.pixels)
+                    {
+                        if idx < bitmaps.len() {
+                            bitmaps[idx] = Some(bmp);
+                        }
+                        if idx < raw_images.len() {
+                            raw_images[idx] = Some(img);
+                        }
+                    }
+                }
+            }
+
             // 2. Hardware state checks per mode
             if mode == PickerMode::AltTab {
                 let mod_vk = if use_ctrl { VK_CONTROL } else { VK_MENU };
-                let is_mod_down = unsafe { (GetAsyncKeyState(mod_vk.0 as i32) as u16 & 0x8000) != 0 };
+                let is_mod_down =
+                    unsafe { (GetAsyncKeyState(mod_vk.0 as i32) as u16 & 0x8000) != 0 };
                 if !is_mod_down {
                     commit_selection = true;
                     break;
                 }
             } else if mode == PickerMode::Touchpad {
                 let live = crate::input::get_live_state();
-                if live.count >= 2 {
+                if live.count >= 2 && !candidates.is_empty() {
                     if fnav_base_x.is_none() {
                         fnav_base_x = Some(live.avg_x);
                         fnav_base_focus = spring.value;
@@ -526,22 +666,32 @@ impl OverlayWindow {
                     }
                     let dx = live.avg_x - fnav_base_x.unwrap();
                     let step = sensitivity.max(80.0) as f64;
-                    let target_f = (fnav_base_focus + dx / step).clamp(0.0, (n - 1) as f64);
+                    let target_f =
+                        (fnav_base_focus + dx / step).clamp(0.0, (candidates.len() - 1) as f64);
                     spring.set_target(target_f);
-                } else if live.count == 0 && fnav_armed {
-                    commit_selection = true;
-                    break;
+                } else if live.count == 0 {
+                    // Fingers lifted! If armed or if fingers were already lifted after brief grace period (120ms):
+                    if fnav_armed || show_start.elapsed() > Duration::from_millis(120) {
+                        commit_selection = !candidates.is_empty();
+                        break;
+                    }
                 }
             }
 
-            // Keyboard navigation checks
+            // Hard watchdog timeout: Never allow picker to remain stuck for more than 8 seconds
+            if show_start.elapsed() > Duration::from_secs(8) {
+                commit_selection = false;
+                break;
+            }
+
+            // Keyboard & Mouse navigation checks
             unsafe {
                 if (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000) != 0 {
                     commit_selection = false;
                     break;
                 }
                 if (GetAsyncKeyState(VK_RETURN.0 as i32) as u16 & 0x8000) != 0 {
-                    commit_selection = true;
+                    commit_selection = !candidates.is_empty();
                     break;
                 }
 
@@ -550,12 +700,14 @@ impl OverlayWindow {
                 let cur_right = (GetAsyncKeyState(VK_RIGHT.0 as i32) as u16 & 0x8000) != 0;
 
                 if cur_left && !prev_left {
-                    selected = (selected + n - 1) % n;
-                    spring.set_target(selected as f64);
+                    let (idx, position) = move_within(&candidates, selected, -1);
+                    selected = idx;
+                    spring.set_target(position as f64);
                 }
                 if cur_right && !prev_right {
-                    selected = (selected + 1) % n;
-                    spring.set_target(selected as f64);
+                    let (idx, position) = move_within(&candidates, selected, 1);
+                    selected = idx;
+                    spring.set_target(position as f64);
                 }
                 prev_left = cur_left;
                 prev_right = cur_right;
@@ -564,20 +716,24 @@ impl OverlayWindow {
                 if (GetAsyncKeyState(VK_MBUTTON.0 as i32) as u16 & 0x8000) != 0 {
                     let mut pt = POINT::default();
                     let _ = GetCursorPos(&mut pt);
-                    if let Some(hit) = layout.hit_test(pt.x as f32, pt.y as f32, n, sw, sh) {
+                    if let Some(hit) = layout.hit_test(pt.x as f32, pt.y as f32, windows, sw, sh) {
                         let _ = PostMessageW(windows[hit].hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
                         commit_selection = false;
                         break;
                     }
                 }
 
-                // Left-click to select window
+                // Left-click to select window, or click outside to dismiss
                 if (GetAsyncKeyState(1) as u16 & 0x8000) != 0 {
                     let mut pt = POINT::default();
                     let _ = GetCursorPos(&mut pt);
-                    if let Some(hit) = layout.hit_test(pt.x as f32, pt.y as f32, n, sw, sh) {
+                    if let Some(hit) = layout.hit_test(pt.x as f32, pt.y as f32, windows, sw, sh) {
                         selected = hit;
                         commit_selection = true;
+                        break;
+                    } else if show_start.elapsed() > Duration::from_millis(220) {
+                        // Clicked backdrop / outside cards: dismiss cleanly
+                        commit_selection = false;
                         break;
                     }
                 }
@@ -585,20 +741,11 @@ impl OverlayWindow {
 
             // 3. Update physics & layout
             spring.update(dt);
-            if (mode == PickerMode::Touchpad && fnav_armed) || mode == PickerMode::AltTab {
-                selected = (spring.value.round() as usize).clamp(0, n - 1);
-            }
-
-            // Drain fresh live thumbnails from background worker
-            while let Ok((idx, img)) = live_rx.try_recv() {
-                if idx < bitmaps.len() {
-                    if let Ok(new_bmp) = self.d2d.create_bitmap_from_rgba(img.width, img.height, &img.pixels) {
-                        bitmaps[idx] = Some(new_bmp);
-                        if idx < raw_images.len() {
-                            raw_images[idx] = Some(img);
-                        }
-                    }
-                }
+            if ((mode == PickerMode::Touchpad && fnav_armed) || mode == PickerMode::AltTab)
+                && !candidates.is_empty()
+            {
+                let position = (spring.value.round() as usize).min(candidates.len() - 1);
+                selected = candidates[position];
             }
 
             layout.update(spring.value as f32, selected);
@@ -633,27 +780,7 @@ impl OverlayWindow {
                 right: (sw + pill_w) * 0.5,
                 bottom: 40.0,
             };
-            self.d2d.fill_rounded_rect(
-                pill_rect,
-                13.0,
-                D2D1_COLOR_F {
-                    r: 0.04,
-                    g: 0.06,
-                    b: 0.09,
-                    a: 0.78 * eased_alpha,
-                },
-            );
-            self.d2d.draw_rounded_rect(
-                pill_rect,
-                13.0,
-                D2D1_COLOR_F {
-                    r: 1.0,
-                    g: 1.0,
-                    b: 1.0,
-                    a: 0.10 * eased_alpha,
-                },
-                1.0,
-            );
+            draw_liquid_glass(&self.d2d, pill_rect, 13.0, accent, false);
             self.d2d.draw_text(
                 &hint_text,
                 pill_rect,

@@ -14,9 +14,12 @@ pub enum AppEvent {
     AltTab { direction: i32 },
     /// Alt/Ctrl modifier released after Alt+Tab
     AltTabRelease,
+    /// Open the picker from Settings for an interactive preview.
+    PreviewPicker,
+    /// Play the selected transition without changing the foreground window.
+    PreviewAnimation,
     /// Open the Modern Settings Dialog
     ShowSettings,
     /// Exit the application cleanly
     Quit,
 }
-

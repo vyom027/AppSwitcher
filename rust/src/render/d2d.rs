@@ -3,23 +3,23 @@
 use windows::core::{w, Interface};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
-    D2D1_PIXEL_FORMAT,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap, ID2D1Brush, ID2D1Factory,
-    ID2D1HwndRenderTarget, ID2D1RenderTarget, ID2D1SolidColorBrush,
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_BRUSH_PROPERTIES,
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_EXTEND_MODE_CLAMP,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1Brush, ID2D1Factory, ID2D1HwndRenderTarget,
+    ID2D1RenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_BITMAP_BRUSH_PROPERTIES, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
+    D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
     D2D1_PRESENT_OPTIONS_IMMEDIATELY, D2D1_RENDER_TARGET_PROPERTIES, D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED,
-    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_WEIGHT_BOLD,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_LEADING,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+};
 
 pub struct D2DContext {
     pub factory: ID2D1Factory,
@@ -56,7 +56,15 @@ impl D2DContext {
             target.SetDpi(96.0, 96.0);
             let rt: ID2D1RenderTarget = target.cast()?;
 
-            let brush = rt.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None)?;
+            let brush = rt.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                None,
+            )?;
 
             Ok(Self {
                 factory,
@@ -118,6 +126,13 @@ impl D2DContext {
                 radiusY: radius,
             };
             self.rt.FillRoundedRectangle(&rounded, &self.brush);
+        }
+    }
+
+    pub fn fill_rect(&self, rect: D2D_RECT_F, color: D2D1_COLOR_F) {
+        unsafe {
+            self.brush.SetColor(&color);
+            self.rt.FillRectangle(&rect, &self.brush);
         }
     }
 
@@ -273,7 +288,13 @@ impl D2DContext {
     }
 
     /// Luxury raycast-caliber ambient radial glow behind cards
-    pub fn draw_glow(&self, rect: D2D_RECT_F, radius: f32, color: D2D1_COLOR_F, blur_passes: usize) {
+    pub fn draw_glow(
+        &self,
+        rect: D2D_RECT_F,
+        radius: f32,
+        color: D2D1_COLOR_F,
+        blur_passes: usize,
+    ) {
         for i in 1..=blur_passes {
             let expansion = i as f32 * 4.0;
             let alpha = color.a * (0.28 / (i as f32).powf(1.15));
@@ -293,6 +314,26 @@ impl D2DContext {
                     a: alpha,
                 },
             );
+        }
+    }
+
+    pub fn set_transform(&self, transform: &windows::Foundation::Numerics::Matrix3x2) {
+        unsafe {
+            self.rt.SetTransform(transform);
+        }
+    }
+
+    pub fn reset_transform(&self) {
+        unsafe {
+            let identity = windows::Foundation::Numerics::Matrix3x2 {
+                M11: 1.0,
+                M12: 0.0,
+                M21: 0.0,
+                M22: 1.0,
+                M31: 0.0,
+                M32: 0.0,
+            };
+            self.rt.SetTransform(&identity);
         }
     }
 }

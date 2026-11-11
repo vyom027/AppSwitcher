@@ -2,7 +2,7 @@
 
 #[derive(Debug, Clone, Copy)]
 pub struct SpringConfig {
-    pub tension: f64, // Stiffness (k)
+    pub tension: f64,  // Stiffness (k)
     pub friction: f64, // Damping (c)
     pub mass: f64,     // Mass (m)
 }
@@ -117,4 +117,3 @@ impl Spring {
         (self.value - self.target).abs() < 0.001 && self.velocity.abs() < 0.005
     }
 }
-

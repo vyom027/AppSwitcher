@@ -1,132 +1,44 @@
 # AppSwitcher
 
-Mac-style 3-finger gesture app switching for Windows 11. GPU-composited overlay
-(PySide6/Qt). Configurable animations + picker layouts, settings GUI in the tray.
+AppSwitcher is a native Rust app switcher for Windows 11 precision touchpads. It uses Direct2D for window previews and animations, and runs from a single EXE without a console window.
 
-### ⬇ [Download the installer](https://github.com/vyom027/AppSwitcher/releases/latest)
+**[Download the latest Windows EXE](https://github.com/vyom027/AppSwitcher/releases/latest)**
 
-![Settings](screenshot.png)
+## Use it
 
-## What it does
+1. Download the Rust EXE from Releases and place it in a permanent folder.
+2. In Windows, open **Settings → Bluetooth & devices → Touchpad → Three-finger gestures** and set **Swipes** to **Nothing**. This lets AppSwitcher receive the gesture.
+3. Close any older Python AppSwitcher instance from its tray icon, then run the Rust EXE.
+4. Open the tray icon's **Settings** to choose the animation, layout, shortcuts, sensitivity, accent color, and windows to hide from the picker. Enable **Start with Windows** there if you want it.
 
-| Gesture | Action |
-|---|---|
-| 3-finger swipe (keep moving) | Switch apps with a transition |
-| 3-finger hold still ~0.2s | Open the app picker |
-| Picker: move fingers | Slide the highlight |
-| Picker: lift fingers | Switch to the highlighted app |
-| Picker: ← → / Enter / Esc / click | Navigate / select / cancel |
+The EXE contains its icon and the Microsoft C runtime. No Python installation or companion files are needed. Keep the EXE in its final location before enabling **Start with Windows**, since that setting records its path.
 
-**7 switch animations:** Slide, Fade, Push, Zoom, Cube, Flip, Stack.
-**7 picker layouts:** Dock, Grid, Coverflow, Fan, Hero+Filmstrip, Wallet, Row.
+| Input | Action |
+| --- | --- |
+| Three-finger swipe | Switch to another app with an animation |
+| Three-finger hold | Open the interactive app picker |
+| Move fingers in the picker | Change the highlighted app |
+| Lift fingers | Select the highlighted app |
+| Alt+Tab or configured shortcut | Open the keyboard picker |
+| Three-finger pinch | Send the configured shortcut |
 
-Pick them in the **tray icon → Settings** (also tune speed, dock magnify,
-sensitivity, accent color; live Preview). Saved to
-`%APPDATA%\AppSwitcher\settings.json`.
+The settings include Slide, Duo Fold, Fade, Zoom, Cube, Flip, Push, and Stack animations. Picker layouts are Dock, Row, Hero, Exposé Cloud, and Spotlight. Settings are saved to `%APPDATA%\AppSwitcher\settings.json` on each PC.
 
-> Works on **Windows precision touchpads** only (raw HID parsing). No admin needed.
+## Build from source
 
----
+Install the current Rust toolchain and Windows SDK, then run:
 
-## Setup
-
-### 1. Install Python 3.10+
-https://python.org/downloads — check "Add to PATH"
-
-### 2. Install dependencies
-```
-pip install pywin32 Pillow PySide6
-```
-(Renderer is PySide6/Qt — GPU-composited overlay. PIL is used for thumbnail
-capture/processing, pywin32 for window control + touchpad raw input.)
-
-### 3. One-time: disable Windows 3-finger gestures
-Settings → Bluetooth & devices → Touchpad → Three-finger gestures
-→ Set "Swipes" to **Nothing**
-
-This frees up 3-finger swipe for AppSwitcher.
-
-### 4. Run
-```
-python main.py
+```powershell
+cd rust
+cargo build --release
 ```
 
-### 5. (Optional) Start with Windows
-Toggle "Start with Windows" in the tray Settings, or:
-```
-python main.py --install     # add to startup
-python main.py --uninstall   # remove
-```
+The result is `rust\target\release\appswitcher.exe`. The build embeds the icon and links the C runtime statically. The project is currently built for 64-bit Windows using the MSVC Rust target.
 
----
+## Python version
 
-## Build a shareable installer
+The earlier Python implementation remains in this repository for reference. Its setup and installer instructions are in [PYTHON_LEGACY.md](PYTHON_LEGACY.md). Run only one implementation at a time because both can listen for the same gestures and shortcut.
 
-Bundles Python + all deps into one `.exe` + an installer (Start Menu shortcut,
-autostart toggle, uninstaller). Needs:
-- `pip install pyinstaller`
-- [Inno Setup 6](https://jrsoftware.org/isdl.php) (free)
+## License
 
-Then:
-```
-build.bat
-```
-Output: `Output\AppSwitcher-Setup.exe` (share this). Without Inno Setup you still
-get the portable app in `dist\AppSwitcher\` — zip and share that.
-
----
-
-## Files
-
-```
-appswitcher/
-├── main.py          ← entry point, run this
-├── gesture_hook.py  ← touchpad Raw Input (WM_INPUT) listener + HID parse
-└── switcher.py      ← animation engine + window switching
-```
-
-## Verify gestures (if nothing happens)
-
-The listener reads raw touchpad HID reports. To confirm your touchpad is
-parsed correctly:
-```
-python gesture_hook.py --debug
-```
-Put 3 fingers on the touchpad and swipe. You should see `[frame] fingers=3 ...`
-lines and a `SWIPE LEFT/RIGHT`. If `fingers` never reaches 3, Windows is still
-eating the gesture — finish step 3 above. If fingers show but no SWIPE fires,
-the swipe distance threshold needs tuning (`SWIPE_THRESHOLD` in gesture_hook.py,
-in touchpad logical units).
-
----
-
-## Tuning
-
-Gesture constants live in `gesture_hook.py` (class `GestureTracker`):
-
-| Constant | Default | What it does |
-|---|---|---|
-| `HOLD_THRESHOLD` | 0.25s | How long to hold before picker shows |
-| `SWIPE_THRESHOLD` | 600 | Min swipe distance, in touchpad logical units |
-| `MIN_FINGERS` | 3 | Fingers required to trigger |
-
-Animation constants live in `switcher.py`:
-
-| Constant | Default | What it does |
-|---|---|---|
-| `ANIM_DURATION` | 0.22s | Slide animation length |
-| `FPS` | 60 | Animation framerate |
-
----
-
-## Troubleshooting
-
-**Gestures not detected**
-- Make sure you disabled Win11 3-finger swipe in Settings
-- Run as Administrator if needed
-
-**Window switch works but no animation**
-- `pip install pygame` and `pip install Pillow`
-
-**Picker is laggy**
-- Normal on first open (capturing thumbnails). Subsequent opens faster.
+MIT. See [LICENSE](LICENSE).

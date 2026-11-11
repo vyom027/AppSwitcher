@@ -1,35 +1,45 @@
-use crate::layouts::PickerLayout;
+use crate::layouts::{draw_contained_thumbnail, draw_liquid_glass, PickerLayout};
 use crate::render::d2d::D2DContext;
 use crate::window::enumerator::WindowInfo;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 
+/// Flat panorama: one large active frame, with neighboring windows arranged
+/// edge-to-edge like a film strip. There is no depth or perspective here.
 pub struct RowLayout {
-    pub card_w: f32,
-    pub card_h: f32,
-    pub gap: f32,
     focus: f32,
     selected: usize,
 }
-
 impl Default for RowLayout {
     fn default() -> Self {
         Self {
-            card_w: 240.0,
-            card_h: 150.0,
-            gap: 28.0,
             focus: 0.0,
             selected: 0,
         }
     }
 }
-
+impl RowLayout {
+    fn geometry(&self, i: usize, sw: f32, sh: f32) -> D2D_RECT_F {
+        let delta = i as f32 - self.focus;
+        let active = i == self.selected;
+        let w = if active { sw * 0.48 } else { sw * 0.30 };
+        let h = if active { sh * 0.52 } else { sh * 0.39 };
+        let step = sw * 0.385;
+        let cx = sw * 0.5 + delta * step;
+        let cy = sh * 0.48 + if active { 0.0 } else { sh * 0.035 };
+        D2D_RECT_F {
+            left: cx - w * 0.5,
+            top: cy - h * 0.5,
+            right: cx + w * 0.5,
+            bottom: cy + h * 0.5,
+        }
+    }
+}
 impl PickerLayout for RowLayout {
     fn update(&mut self, focus: f32, selected: usize) {
         self.focus = focus;
         self.selected = selected;
     }
-
     fn render(
         &self,
         d2d: &D2DContext,
@@ -44,252 +54,154 @@ impl PickerLayout for RowLayout {
         if n == 0 {
             return;
         }
-
-        let total_w = n as f32 * self.card_w + (n as f32 - 1.0) * self.gap;
-        let fit = (sw - 120.0) / total_w;
-        let scale_factor = fit.min(1.0);
-
-        let cw = self.card_w * scale_factor;
-        let ch = self.card_h * scale_factor;
-        let gap = self.gap * scale_factor;
-
-        let total_scaled_w = n as f32 * cw + (n as f32 - 1.0) * gap;
-        let x0 = (sw - total_scaled_w) * 0.5;
-        let cy = sh * 0.5 - 10.0;
-
-        // Centered Header Badge for Active Window
-        if self.selected < windows.len() {
-            let active_title = &windows[self.selected].title;
-            let title_display = if active_title.chars().count() > 50 {
-                format!("{}...", active_title.chars().take(50).collect::<String>())
-            } else {
-                active_title.clone()
-            };
-            let pill_h = 36.0;
-            let pill_y = cy - ch * 0.5 - 60.0;
-            let pill_w = (title_display.len() as f32 * 8.0 + 70.0).clamp(240.0, 600.0);
-            let pill_rect = D2D_RECT_F {
-                left: (sw - pill_w) * 0.5,
-                top: pill_y,
-                right: (sw + pill_w) * 0.5,
-                bottom: pill_y + pill_h,
-            };
+        // The thin baseline makes this read as a continuous panorama, not a grid.
+        d2d.fill_rect(
+            D2D_RECT_F {
+                left: sw * 0.06,
+                top: sh * 0.79,
+                right: sw * 0.94,
+                bottom: sh * 0.792,
+            },
+            D2D1_COLOR_F {
+                r: 0.75,
+                g: 0.82,
+                b: 0.94,
+                a: 0.22,
+            },
+        );
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|a, b| {
+            ((*b as f32 - self.focus).abs()).total_cmp(&((*a as f32 - self.focus).abs()))
+        });
+        for i in order {
+            let r = self.geometry(i, sw, sh);
+            if r.right < 0.0 || r.left > sw {
+                continue;
+            }
+            let selected = i == self.selected;
+            let radius = if selected { 6.0 } else { 3.0 };
             d2d.fill_rounded_rect(
-                pill_rect,
-                18.0,
+                D2D_RECT_F {
+                    left: r.left + 5.0,
+                    top: r.top + 8.0,
+                    right: r.right + 5.0,
+                    bottom: r.bottom + 8.0,
+                },
+                radius,
                 D2D1_COLOR_F {
-                    r: 0.05,
-                    g: 0.07,
-                    b: 0.10,
-                    a: 0.88,
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.55,
                 },
             );
-            d2d.draw_rounded_rect(
-                pill_rect,
-                18.0,
-                D2D1_COLOR_F {
-                    r: 1.0,
-                    g: 1.0,
-                    b: 1.0,
-                    a: 0.18,
+            draw_liquid_glass(d2d, r, radius, accent, selected);
+            draw_contained_thumbnail(
+                d2d,
+                D2D_RECT_F {
+                    left: r.left + 3.0,
+                    top: r.top + 3.0,
+                    right: r.right - 3.0,
+                    bottom: r.bottom - 3.0,
                 },
-                1.0,
+                bitmaps.get(i).and_then(Option::as_ref),
+                if selected { 1.0 } else { 0.82 },
             );
-
-            // Active Icon in header pill
-            if self.selected < icons.len() {
-                if let Some(ref icon_bmp) = icons[self.selected] {
-                    let ic_rect = D2D_RECT_F {
-                        left: pill_rect.left + 10.0,
-                        top: pill_rect.top + 7.0,
-                        right: pill_rect.left + 32.0,
-                        bottom: pill_rect.top + 29.0,
-                    };
-                    d2d.draw_bitmap(icon_bmp, ic_rect, 1.0);
-                }
-            }
-
-            let text_rect = D2D_RECT_F {
-                left: pill_rect.left + 38.0,
-                top: pill_rect.top,
-                right: pill_rect.right - 14.0,
-                bottom: pill_rect.bottom,
-            };
-            d2d.draw_text(
-                &title_display,
-                text_rect,
-                D2D1_COLOR_F {
-                    r: 0.96,
-                    g: 0.97,
-                    b: 1.0,
-                    a: 1.0,
-                },
-                14.0,
-                true,
-                false,
-            );
-        }
-
-        for i in 0..n {
-            let offset = (i as f32 - self.focus).abs();
-            let pop = 1.0 + 0.14 / (1.0 + offset * offset * 2.0);
-
-            let w = cw * pop;
-            let h = ch * pop;
-
-            let bx = x0 + i as f32 * (cw + gap);
-            let cx = bx + (cw - w) * 0.5;
-            let dy = cy - h * 0.5;
-
-            let rect = D2D_RECT_F {
-                left: cx,
-                top: dy,
-                right: cx + w,
-                bottom: dy + h,
-            };
-
-            let is_sel = i == self.selected;
-
-            if is_sel {
-                d2d.draw_glow(rect, 16.0, accent, 4);
-            }
-
-            d2d.fill_rounded_rect(
-                rect,
-                14.0,
-                D2D1_COLOR_F {
-                    r: 0.09,
-                    g: 0.11,
-                    b: 0.15,
-                    a: if is_sel { 1.0 } else { 0.82 },
-                },
-            );
-
-            if i < bitmaps.len() {
-                if let Some(ref bmp) = bitmaps[i] {
-                    d2d.fill_rounded_bitmap(bmp, rect, 14.0, if is_sel { 1.0 } else { 0.82 });
-                }
-            }
-
-            if is_sel {
-                d2d.draw_rounded_rect(rect, 14.0, accent, 2.5);
-            } else {
-                d2d.draw_rounded_rect(
-                    rect,
-                    14.0,
-                    D2D1_COLOR_F {
-                        r: 1.0,
-                        g: 1.0,
-                        b: 1.0,
-                        a: 0.10,
+            if selected {
+                d2d.draw_rounded_rect(r, radius, accent, 3.0);
+                let title = &windows[i].title;
+                d2d.draw_text(
+                    title,
+                    D2D_RECT_F {
+                        left: r.left + 18.0,
+                        top: r.bottom + 12.0,
+                        right: r.right - 18.0,
+                        bottom: r.bottom + 42.0,
                     },
-                    1.0,
+                    D2D1_COLOR_F {
+                        r: 0.96,
+                        g: 0.97,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    17.0,
+                    true,
+                    true,
                 );
-            }
-
-            // Top-left App Icon Badge
-            if i < icons.len() {
-                if let Some(ref icon_bmp) = icons[i] {
-                    let b_size = 24.0;
-                    let b_pad = 3.0;
-                    let b_rect = D2D_RECT_F {
-                        left: cx + 8.0,
-                        top: dy + 8.0,
-                        right: cx + 8.0 + b_size + b_pad * 2.0,
-                        bottom: dy + 8.0 + b_size + b_pad * 2.0,
-                    };
-                    d2d.fill_rounded_rect(
-                        b_rect,
-                        6.0,
-                        D2D1_COLOR_F {
-                            r: 0.05,
-                            g: 0.07,
-                            b: 0.10,
-                            a: 0.88,
-                        },
-                    );
-                    d2d.draw_rounded_rect(
-                        b_rect,
-                        6.0,
-                        D2D1_COLOR_F {
-                            r: 1.0,
-                            g: 1.0,
-                            b: 1.0,
-                            a: 0.20,
+                if let Some(Some(icon)) = icons.get(i) {
+                    d2d.draw_bitmap(
+                        icon,
+                        D2D_RECT_F {
+                            left: r.left + 16.0,
+                            top: r.top + 16.0,
+                            right: r.left + 56.0,
+                            bottom: r.top + 56.0,
                         },
                         1.0,
                     );
-                    let ic_rect = D2D_RECT_F {
-                        left: b_rect.left + b_pad,
-                        top: b_rect.top + b_pad,
-                        right: b_rect.right - b_pad,
-                        bottom: b_rect.bottom - b_pad,
-                    };
-                    d2d.draw_bitmap(icon_bmp, ic_rect, 1.0);
                 }
+            } else {
+                d2d.draw_rounded_rect(
+                    r,
+                    radius,
+                    D2D1_COLOR_F {
+                        r: 0.72,
+                        g: 0.80,
+                        b: 0.92,
+                        a: 0.25,
+                    },
+                    1.0,
+                );
+                d2d.draw_text(
+                    &windows[i].title,
+                    D2D_RECT_F {
+                        left: r.left + 8.0,
+                        top: r.bottom + 10.0,
+                        right: r.right - 8.0,
+                        bottom: r.bottom + 32.0,
+                    },
+                    D2D1_COLOR_F {
+                        r: 0.76,
+                        g: 0.82,
+                        b: 0.92,
+                        a: 0.82,
+                    },
+                    11.0,
+                    false,
+                    true,
+                );
             }
-
-            // Bottom title banner
-            let banner_rect = D2D_RECT_F {
-                left: cx,
-                top: dy + h - 34.0,
-                right: cx + w,
-                bottom: dy + h,
-            };
-            d2d.fill_rounded_rect(
-                banner_rect,
-                14.0,
-                D2D1_COLOR_F {
-                    r: 0.04,
-                    g: 0.06,
-                    b: 0.09,
-                    a: 0.85,
-                },
-            );
-
-            let text_rect = D2D_RECT_F {
-                left: cx + 10.0,
-                top: dy + h - 30.0,
-                right: cx + w - 10.0,
-                bottom: dy + h - 6.0,
-            };
-            d2d.draw_text(
-                &windows[i].title,
-                text_rect,
-                D2D1_COLOR_F {
-                    r: 0.95,
-                    g: 0.96,
-                    b: 1.0,
-                    a: if is_sel { 1.0 } else { 0.78 },
-                },
-                12.0,
-                is_sel,
-                true,
-            );
         }
+        d2d.draw_text(
+            "PANORAMA",
+            D2D_RECT_F {
+                left: 26.0,
+                top: 18.0,
+                right: 260.0,
+                bottom: 42.0,
+            },
+            accent,
+            12.0,
+            true,
+            false,
+        );
     }
-
-    fn hit_test(&self, px: f32, py: f32, count: usize, sw: f32, sh: f32) -> Option<usize> {
-        let total_w = count as f32 * self.card_w + (count as f32 - 1.0) * self.gap;
-        let fit = (sw - 120.0) / total_w;
-        let scale_factor = fit.min(1.0);
-
-        let cw = self.card_w * scale_factor;
-        let ch = self.card_h * scale_factor;
-        let gap = self.gap * scale_factor;
-
-        let total_scaled_w = count as f32 * cw + (count as f32 - 1.0) * gap;
-        let x0 = (sw - total_scaled_w) * 0.5;
-        let cy = sh * 0.5 - 20.0;
-
-        for i in 0..count {
-            let bx = x0 + i as f32 * (cw + gap);
-            let dy = cy - ch * 0.5;
-
-            if px >= bx && px <= bx + cw && py >= dy && py <= dy + ch {
-                return Some(i);
-            }
-        }
-        None
+    fn hit_test(
+        &self,
+        px: f32,
+        py: f32,
+        windows: &[WindowInfo],
+        sw: f32,
+        sh: f32,
+    ) -> Option<usize> {
+        let n = windows.len();
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|a, b| {
+            ((*a as f32 - self.focus).abs()).total_cmp(&((*b as f32 - self.focus).abs()))
+        });
+        order.into_iter().find(|&i| {
+            let r = self.geometry(i, sw, sh);
+            px >= r.left && px <= r.right && py >= r.top && py <= r.bottom
+        })
     }
 }

@@ -69,4 +69,3 @@ pub fn start_mru_watcher() {
         }
     });
 }
-

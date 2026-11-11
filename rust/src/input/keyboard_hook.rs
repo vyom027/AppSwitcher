@@ -2,11 +2,12 @@
 
 use crate::event::{AppEvent, WM_APP_EVENT};
 use crossbeam_channel::Sender;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_LCONTROL,
+    keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_LCONTROL,
     VK_LMENU, VK_MENU, VK_RCONTROL, VK_RMENU, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -19,17 +20,146 @@ use windows::Win32::UI::WindowsAndMessaging::{
 static HOOK_HANDLE: parking_lot::Mutex<Option<usize>> = parking_lot::Mutex::new(None);
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static MOD_DOWN: AtomicBool = AtomicBool::new(false);
+static SEARCH_MODE: AtomicBool = AtomicBool::new(false);
+static SEARCH_INPUT: parking_lot::Mutex<VecDeque<SearchInput>> =
+    parking_lot::Mutex::new(VecDeque::new());
 static ALTTAB_ACTIVE: AtomicBool = AtomicBool::new(false);
 static TRIGGER_VK: AtomicU32 = AtomicU32::new(VK_TAB.0 as u32);
 static USE_CTRL: AtomicBool = AtomicBool::new(false);
 static UI_HWND: AtomicUsize = AtomicUsize::new(0);
 
-static EVENT_SENDER: parking_lot::RwLock<Option<Sender<AppEvent>>> =
-    parking_lot::RwLock::new(None);
+static EVENT_SENDER: parking_lot::RwLock<Option<Sender<AppEvent>>> = parking_lot::RwLock::new(None);
 
 static LAST_FG_HWND: AtomicU32 = AtomicU32::new(0);
 static LAST_FG_FS: AtomicBool = AtomicBool::new(false);
 static LAST_FG_TIME: parking_lot::Mutex<Option<Instant>> = parking_lot::Mutex::new(None);
+
+#[derive(Debug, Clone, Copy)]
+pub enum SearchInput {
+    Character(char),
+    Backspace,
+    Clear,
+}
+
+pub fn set_search_mode(enabled: bool) {
+    SEARCH_MODE.store(enabled, Ordering::SeqCst);
+    if !enabled {
+        SEARCH_INPUT.lock().clear();
+    }
+}
+
+pub fn take_search_input() -> Vec<SearchInput> {
+    SEARCH_INPUT.lock().drain(..).collect()
+}
+
+fn decode_search_key(vk: u32) -> Option<SearchInput> {
+    if vk == 0x08 {
+        return Some(SearchInput::Backspace);
+    }
+    if vk == 0x20 {
+        return Some(SearchInput::Character(' '));
+    }
+    if vk == 0x41 && unsafe { (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0 } {
+        return Some(SearchInput::Clear);
+    }
+    let shifted = unsafe { (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0 };
+    if (0x41..=0x5a).contains(&vk) {
+        let ch = char::from_u32(if shifted { vk } else { vk + 0x20 })?;
+        return Some(SearchInput::Character(ch));
+    }
+    if (0x30..=0x39).contains(&vk) {
+        return char::from_u32(vk).map(SearchInput::Character);
+    }
+    let ch = match vk {
+        0xba => {
+            if shifted {
+                ':'
+            } else {
+                ';'
+            }
+        }
+        0xbb => {
+            if shifted {
+                '+'
+            } else {
+                '='
+            }
+        }
+        0xbc => {
+            if shifted {
+                '<'
+            } else {
+                ','
+            }
+        }
+        0xbd => {
+            if shifted {
+                '_'
+            } else {
+                '-'
+            }
+        }
+        0xbe => {
+            if shifted {
+                '>'
+            } else {
+                '.'
+            }
+        }
+        0xbf => {
+            if shifted {
+                '?'
+            } else {
+                '/'
+            }
+        }
+        0xc0 => {
+            if shifted {
+                '~'
+            } else {
+                '`'
+            }
+        }
+        0xdb => {
+            if shifted {
+                '{'
+            } else {
+                '['
+            }
+        }
+        0xdc => {
+            if shifted {
+                '|'
+            } else {
+                '\\'
+            }
+        }
+        0xdd => {
+            if shifted {
+                '}'
+            } else {
+                ']'
+            }
+        }
+        0xde => {
+            if shifted {
+                '"'
+            } else {
+                '\''
+            }
+        }
+        _ => return None,
+    };
+    Some(SearchInput::Character(ch))
+}
+
+fn is_search_key(vk: u32) -> bool {
+    (0x30..=0x5a).contains(&vk)
+        || (0xba..=0xc0).contains(&vk)
+        || (0xdb..=0xdf).contains(&vk)
+        || vk == 0x08
+        || vk == 0x20
+}
 
 pub fn configure(mod_name: &str, trigger_vk: u32) {
     let is_ctrl = mod_name.eq_ignore_ascii_case("ctrl");
@@ -119,12 +249,27 @@ unsafe extern "system" fn hook_proc(n_code: i32, w_param: WPARAM, l_param: LPARA
                         let _ = tx.send(AppEvent::AltTabRelease);
                         let ui = UI_HWND.load(Ordering::Relaxed);
                         if ui != 0 {
-                            let _ = PostMessageW(HWND(ui as *mut _), WM_APP_EVENT, WPARAM(0), LPARAM(0));
+                            let _ = PostMessageW(
+                                HWND(ui as *mut _),
+                                WM_APP_EVENT,
+                                WPARAM(0),
+                                LPARAM(0),
+                            );
                         }
                     }
                 }
             }
-        } else if vk == TRIGGER_VK.load(Ordering::Relaxed) && is_down && MOD_DOWN.load(Ordering::Relaxed) {
+        } else if SEARCH_MODE.load(Ordering::Relaxed) && is_search_key(vk) {
+            if is_down {
+                if let Some(input) = decode_search_key(vk) {
+                    SEARCH_INPUT.lock().push_back(input);
+                }
+            }
+            return LRESULT(1);
+        } else if vk == TRIGGER_VK.load(Ordering::Relaxed)
+            && is_down
+            && MOD_DOWN.load(Ordering::Relaxed)
+        {
             if !foreground_is_fullscreen() {
                 let shift = (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
                 let direction = if shift { -1 } else { 1 };
@@ -141,7 +286,8 @@ unsafe extern "system" fn hook_proc(n_code: i32, w_param: WPARAM, l_param: LPARA
                     let _ = tx.send(AppEvent::AltTab { direction });
                     let ui = UI_HWND.load(Ordering::Relaxed);
                     if ui != 0 {
-                        let _ = PostMessageW(HWND(ui as *mut _), WM_APP_EVENT, WPARAM(0), LPARAM(0));
+                        let _ =
+                            PostMessageW(HWND(ui as *mut _), WM_APP_EVENT, WPARAM(0), LPARAM(0));
                     }
                 }
 

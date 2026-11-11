@@ -18,7 +18,8 @@ pub struct WindowInfo {
 unsafe impl Send for WindowInfo {}
 unsafe impl Sync for WindowInfo {}
 
-static CACHE: parking_lot::Mutex<Option<(Instant, Vec<WindowInfo>)>> = parking_lot::Mutex::new(None);
+static CACHE: parking_lot::Mutex<Option<(Instant, Vec<WindowInfo>)>> =
+    parking_lot::Mutex::new(None);
 const CACHE_TTL: Duration = Duration::from_millis(250);
 
 pub fn invalidate_window_cache() {

@@ -23,11 +23,7 @@ pub struct Matrix3x3 {
 impl Matrix3x3 {
     pub fn identity() -> Self {
         Self {
-            m: [
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
+            m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         }
     }
 
@@ -79,13 +75,8 @@ impl Matrix3x3 {
             let f = q.p0.y;
 
             Self {
-                m: [
-                    [a, b, c],
-                    [d, e, f],
-                    [g, h, 1.0],
-                ],
+                m: [[a, b, c], [d, e, f], [g, h, 1.0]],
             }
         }
     }
 }
-

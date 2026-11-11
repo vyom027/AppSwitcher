@@ -47,6 +47,8 @@ impl TransitionKind {
             Self::Slide => SlideTransition::new(direction).render(d2d, curr, next, t, sw, sh),
             Self::DuoFold => DuoFoldTransition::new(direction).render(d2d, curr, next, t, sw, sh),
             Self::Fade => {
+                // Keep both frames fixed in place: this is a true dissolve,
+                // with no directional motion or scale that could read as Zoom.
                 let rect = D2D_RECT_F {
                     left: 0.0,
                     top: 0.0,
@@ -57,8 +59,11 @@ impl TransitionKind {
                 d2d.draw_bitmap(next, rect, t.min(1.0));
             }
             Self::Zoom => {
-                let curr_s = 1.0 + 0.18 * t;
-                let next_s = 0.82 + 0.18 * t;
+                // Move through the outgoing frame into a tighter incoming frame.
+                // The brief overlap keeps the transition continuous while the
+                // scale change makes this clearly different from a dissolve.
+                let curr_s = 1.0 + 0.34 * t;
+                let next_s = 0.72 + 0.28 * t;
                 let c_rect = D2D_RECT_F {
                     left: (sw - sw * curr_s) * 0.5,
                     top: (sh - sh * curr_s) * 0.5,
@@ -71,58 +76,78 @@ impl TransitionKind {
                     right: (sw + sw * next_s) * 0.5,
                     bottom: (sh + sh * next_s) * 0.5,
                 };
-                d2d.draw_bitmap(curr, c_rect, (1.0 - t).max(0.0));
-                d2d.draw_bitmap(next, n_rect, t.min(1.0));
+                let curr_alpha = (1.0 - (t / 0.72)).clamp(0.0, 1.0);
+                let next_alpha = ((t - 0.18) / 0.82).clamp(0.0, 1.0);
+                d2d.draw_bitmap(curr, c_rect, curr_alpha);
+                d2d.draw_bitmap(next, n_rect, next_alpha);
             }
             Self::Push => {
-                // Static current app slightly dimming
-                let full_rect = D2D_RECT_F {
-                    left: 0.0,
-                    top: 0.0,
-                    right: sw,
-                    bottom: sh,
-                };
-                d2d.draw_bitmap(curr, full_rect, 1.0 - 0.30 * t);
-
-                // Next app slides over from the side with a deep drop shadow
+                // Layered shove: the outgoing frame recedes while the incoming
+                // frame travels over it. This keeps Push visually distinct from
+                // Slide, where both frames remain flat and move as one pair.
                 let dir = direction as f32;
-                let next_x = -dir * (1.0 - t) * sw;
+                let curr_s = 1.0 - 0.18 * t;
+                let curr_w = sw * curr_s;
+                let curr_h = sh * curr_s;
+                let curr_x = (sw - curr_w) * 0.5 + dir * t * sw * 0.16;
+                let curr_y = (sh - curr_h) * 0.5;
+                let curr_rect = D2D_RECT_F {
+                    left: curr_x,
+                    top: curr_y,
+                    right: curr_x + curr_w,
+                    bottom: curr_y + curr_h,
+                };
+                d2d.draw_bitmap(curr, curr_rect, 1.0 - 0.28 * t);
+
+                let next_s = 0.88 + 0.12 * t;
+                let next_w = sw * next_s;
+                let next_h = sh * next_s;
+                let next_x = -dir * (1.0 - t) * sw + (sw - next_w) * 0.5;
+                let next_y = (sh - next_h) * 0.5;
                 let next_rect = D2D_RECT_F {
                     left: next_x,
-                    top: 0.0,
-                    right: next_x + sw,
-                    bottom: sh,
+                    top: next_y,
+                    right: next_x + next_w,
+                    bottom: next_y + next_h,
                 };
 
-                // Drop shadow along leading edge
-                let shadow_x = if dir > 0.0 { next_x + sw } else { next_x - 30.0 };
+                // Moving edge shadow reinforces the physical push.
+                let shadow_x = if dir > 0.0 {
+                    next_x + next_w
+                } else {
+                    next_x - 38.0
+                };
                 d2d.fill_rounded_rect(
                     D2D_RECT_F {
                         left: shadow_x,
-                        top: 0.0,
-                        right: shadow_x + 30.0,
-                        bottom: sh,
+                        top: next_y,
+                        right: shadow_x + 38.0,
+                        bottom: next_y + next_h,
                     },
                     0.0,
                     D2D1_COLOR_F {
                         r: 0.0,
                         g: 0.0,
                         b: 0.0,
-                        a: 0.50 * (1.0 - t),
+                        a: 0.68 * (1.0 - t),
                     },
                 );
 
-                d2d.draw_bitmap(next, next_rect, 1.0);
+                d2d.draw_bitmap(next, next_rect, (0.82 + 0.18 * t).min(1.0));
             }
             Self::Stack => {
-                // Current app dims as next app rises
-                let full_rect = D2D_RECT_F {
-                    left: 0.0,
-                    top: 0.0,
-                    right: sw,
-                    bottom: sh,
+                // The old frame recedes and dims while the new frame rises
+                // vertically, giving this a layered-card feel unlike Push.
+                let curr_s = 1.0 - 0.08 * t;
+                let curr_w = sw * curr_s;
+                let curr_h = sh * curr_s;
+                let curr_rect = D2D_RECT_F {
+                    left: (sw - curr_w) * 0.5,
+                    top: (sh - curr_h) * 0.5,
+                    right: (sw + curr_w) * 0.5,
+                    bottom: (sh + curr_h) * 0.5,
                 };
-                d2d.draw_bitmap(curr, full_rect, 1.0 - 0.40 * t);
+                d2d.draw_bitmap(curr, curr_rect, 1.0 - 0.35 * t);
 
                 // Next app rises up from bottom
                 let next_y = (1.0 - t) * sh;
@@ -192,7 +217,7 @@ fn render_3d_rot_panel(
 
     let cosine = angle_rad.cos();
     let sine = angle_rad.sin();
-    let cy = sh * 0.5;
+    let _cy = sh * 0.5;
     let cx = sw * 0.5;
 
     let eye = 1.6 * sw;
@@ -221,14 +246,10 @@ fn render_3d_rot_panel(
         let sx0 = cx + x3d_0 * p0;
         let sx1 = cx + x3d_1 * p1;
 
-        let h0 = sh * p0;
-        let h1 = sh * p1;
-        let h_avg = (h0 + h1) * 0.5;
-
         let left = sx0.min(sx1);
         let right = sx0.max(sx1) + 0.6; // slight subpixel overlap to prevent seams
-        let top = cy - h_avg * 0.5;
-        let bottom = cy + h_avg * 0.5;
+        let top = 0.0;
+        let bottom = sh;
 
         let dst_rect = D2D_RECT_F {
             left,

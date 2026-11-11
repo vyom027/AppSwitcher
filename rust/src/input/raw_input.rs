@@ -92,9 +92,9 @@ unsafe fn handle_raw_input(h_raw_input: HRAWINPUT) {
 
     let device_handle = raw.header.hDevice.0 as usize;
     let mut cache = LAYOUT_CACHE.lock();
-    let layout_entry = cache.entry(device_handle).or_insert_with(|| {
-        DeviceLayout::from_device_handle(raw.header.hDevice)
-    });
+    let layout_entry = cache
+        .entry(device_handle)
+        .or_insert_with(|| DeviceLayout::from_device_handle(raw.header.hDevice));
 
     let layout = match layout_entry.as_ref() {
         Some(l) => l,
@@ -164,13 +164,19 @@ pub fn run_input_thread(
     ui_hwnd_usize: usize,
     use_ctrl: bool,
     trigger_vk: u32,
+    sensitivity: i32,
 ) -> Result<(), windows::core::Error> {
     // 1. Setup gesture callbacks to post to UI thread
     let tx_swipe = event_tx.clone();
     let on_swipe = move |direction| {
         let _ = tx_swipe.send(AppEvent::Swipe(direction));
         unsafe {
-            let _ = PostMessageW(HWND(ui_hwnd_usize as *mut _), WM_APP_EVENT, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(
+                HWND(ui_hwnd_usize as *mut _),
+                WM_APP_EVENT,
+                WPARAM(0),
+                LPARAM(0),
+            );
         }
     };
 
@@ -178,7 +184,12 @@ pub fn run_input_thread(
     let on_hold = move |_dir| {
         let _ = tx_hold.send(AppEvent::Hold);
         unsafe {
-            let _ = PostMessageW(HWND(ui_hwnd_usize as *mut _), WM_APP_EVENT, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(
+                HWND(ui_hwnd_usize as *mut _),
+                WM_APP_EVENT,
+                WPARAM(0),
+                LPARAM(0),
+            );
         }
     };
 
@@ -186,7 +197,12 @@ pub fn run_input_thread(
     let on_pinch = move || {
         let _ = tx_pinch.send(AppEvent::Pinch);
         unsafe {
-            let _ = PostMessageW(HWND(ui_hwnd_usize as *mut _), WM_APP_EVENT, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(
+                HWND(ui_hwnd_usize as *mut _),
+                WM_APP_EVENT,
+                WPARAM(0),
+                LPARAM(0),
+            );
         }
     };
 
@@ -204,7 +220,11 @@ pub fn run_input_thread(
         }
     };
 
+    // Reduce required travel by about 25% at the same setting. Smaller values
+    // mean a swipe registers with less finger movement.
+    let swipe_threshold = (sensitivity as f64 * 0.15).clamp(20.0, 60.0);
     *TRACKER.lock() = Some(GestureTracker::new(
+        swipe_threshold,
         on_swipe,
         on_hold,
         Some(on_arm),
@@ -214,7 +234,12 @@ pub fn run_input_thread(
 
     unsafe {
         // 2. Install Low-Level Keyboard Hook on this thread
-        if let Err(e) = keyboard_hook::install(event_tx.clone(), HWND(ui_hwnd_usize as *mut _), use_ctrl, trigger_vk) {
+        if let Err(e) = keyboard_hook::install(
+            event_tx.clone(),
+            HWND(ui_hwnd_usize as *mut _),
+            use_ctrl,
+            trigger_vk,
+        ) {
             eprintln!("[warn] Failed to install keyboard hook: {:?}", e);
         } else {
             println!("[input] Low-level keyboard hook active (Alt+Tab interception enabled)");
@@ -256,7 +281,10 @@ pub fn run_input_thread(
         };
 
         if let Err(e) = RegisterRawInputDevices(&[rid], size_of::<RAWINPUTDEVICE>() as u32) {
-            eprintln!("[warn] Precision Touchpad RawInput registration failed: {:?}", e);
+            eprintln!(
+                "[warn] Precision Touchpad RawInput registration failed: {:?}",
+                e
+            );
         } else {
             println!("[input] Precision Touchpad RawInput listener active (RIDEV_INPUTSINK)");
         }

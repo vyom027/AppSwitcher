@@ -7,15 +7,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{BOOL, HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-    GetDIBits, GetWindowDC, ReleaseDC, SelectObject, SetStretchBltMode, StretchBlt,
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HALFTONE, HDC, SRCCOPY,
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
+    ReleaseDC, SelectObject, SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    DIB_RGB_COLORS, HALFTONE, HDC, SRCCOPY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetDesktopWindow, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, IsIconic, IsZoomed, PeekMessageW, SystemParametersInfoW,
-    TranslateMessage, MSG, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SPI_GETWORKAREA,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    GetDesktopWindow, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, IsIconic, IsWindowVisible, IsZoomed, SystemParametersInfoW, SM_CXSCREEN,
+    SM_CYSCREEN, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
 #[link(name = "user32")]
@@ -31,12 +30,7 @@ pub struct ImageBuffer {
 }
 
 pub fn screen_size() -> (i32, i32) {
-    unsafe {
-        (
-            GetSystemMetrics(SM_CXSCREEN),
-            GetSystemMetrics(SM_CYSCREEN),
-        )
-    }
+    unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
 }
 
 pub fn work_area() -> (i32, i32, i32, i32) {
@@ -72,7 +66,10 @@ pub fn work_area() -> (i32, i32, i32, i32) {
         if wy == 0 {
             let mut detected_top_bar_h: i32 = 0;
 
-            unsafe extern "system" fn enum_top_bar_proc(hwnd: HWND, lparam: windows::Win32::Foundation::LPARAM) -> BOOL {
+            unsafe extern "system" fn enum_top_bar_proc(
+                hwnd: HWND,
+                lparam: windows::Win32::Foundation::LPARAM,
+            ) -> BOOL {
                 use windows::Win32::UI::WindowsAndMessaging::{
                     GetWindowLongW, GetWindowRect, IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
                     WS_EX_TOPMOST,
@@ -254,17 +251,7 @@ pub fn capture_frosted_backdrop(wx: i32, wy: i32, ww: i32, wh: i32) -> ImageBuff
 
         let _ = SetStretchBltMode(hdc_mem, HALFTONE);
         let _ = StretchBlt(
-            hdc_mem,
-            0,
-            0,
-            bw as i32,
-            bh as i32,
-            hdc_screen,
-            wx,
-            wy,
-            ww,
-            wh,
-            SRCCOPY,
+            hdc_mem, 0, 0, bw as i32, bh as i32, hdc_screen, wx, wy, ww, wh, SRCCOPY,
         );
 
         SelectObject(hdc_mem, old_obj);
@@ -316,16 +303,17 @@ pub fn capture_frosted_backdrop(wx: i32, wy: i32, ww: i32, wh: i32) -> ImageBuff
             let w = bw as usize;
             let h = bh as usize;
 
-            box_blur_1d(&raw_pixels, &mut temp, w, h, 6, true);
-            box_blur_1d(&temp, &mut raw_pixels, w, h, 6, false);
-            box_blur_1d(&raw_pixels, &mut temp, w, h, 6, true);
-            box_blur_1d(&temp, &mut raw_pixels, w, h, 6, false);
+            box_blur_1d(&raw_pixels, &mut temp, w, h, 4, true);
+            box_blur_1d(&temp, &mut raw_pixels, w, h, 4, false);
+            box_blur_1d(&raw_pixels, &mut temp, w, h, 4, true);
+            box_blur_1d(&temp, &mut raw_pixels, w, h, 4, false);
 
-            // Blend with dark glass tint (#0c0e14, 55% tint)
+            // Preserve the desktop's color and shape under the glass; the old
+            // 55% near-black wash crushed detail and made every picker feel muddy.
             for chunk in raw_pixels.chunks_exact_mut(4) {
-                chunk[0] = ((chunk[0] as u32 * 45 + 12 * 55) / 100) as u8;
-                chunk[1] = ((chunk[1] as u32 * 45 + 14 * 55) / 100) as u8;
-                chunk[2] = ((chunk[2] as u32 * 45 + 20 * 55) / 100) as u8;
+                chunk[0] = ((chunk[0] as u32 * 78 + 20 * 22) / 100) as u8;
+                chunk[1] = ((chunk[1] as u32 * 78 + 27 * 22) / 100) as u8;
+                chunk[2] = ((chunk[2] as u32 * 78 + 42 * 22) / 100) as u8;
                 chunk[3] = 255;
             }
 
@@ -340,9 +328,9 @@ pub fn capture_frosted_backdrop(wx: i32, wy: i32, ww: i32, wh: i32) -> ImageBuff
     // High-end fallback dark frosted tint
     let mut fallback = vec![0u8; (bw * bh * 4) as usize];
     for chunk in fallback.chunks_exact_mut(4) {
-        chunk[0] = 14;
-        chunk[1] = 16;
-        chunk[2] = 22;
+        chunk[0] = 24;
+        chunk[1] = 31;
+        chunk[2] = 47;
         chunk[3] = 255;
     }
     ImageBuffer {
@@ -354,11 +342,39 @@ pub fn capture_frosted_backdrop(wx: i32, wy: i32, ww: i32, wh: i32) -> ImageBuff
 
 // ─── Window Frame Cache & Parallel Capture ───────────────────────────────────
 
+pub static OVERLAY_VISIBLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+pub static GDI_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 static FRAME_CACHE: LazyLock<Mutex<HashMap<isize, (Instant, ImageBuffer)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-const FRAME_TTL: Duration = Duration::from_millis(2500);
+const FRAME_TTL: Duration = Duration::from_millis(3000);
+const FRAME_RETENTION: Duration = Duration::from_secs(10);
+const MAX_FRAME_CACHE_BYTES: usize = 48 * 1024 * 1024;
+const MAX_FRAME_CACHE_ENTRIES: usize = 5;
 
-static IS_PREWARMING_WINDOWS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn cache_frame(hwnd: isize, captured_at: Instant, image: ImageBuffer) {
+    let mut cache = FRAME_CACHE.lock();
+    cache.retain(|_, (ts, _)| captured_at.duration_since(*ts) < FRAME_RETENTION);
+    cache.insert(hwnd, (captured_at, image));
+
+    while cache.len() > MAX_FRAME_CACHE_ENTRIES
+        || (cache.len() > 1
+            && cache.values().map(|(_, img)| img.pixels.len()).sum::<usize>()
+                > MAX_FRAME_CACHE_BYTES)
+    {
+        if let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, (ts, _))| *ts)
+            .map(|(hwnd, _)| *hwnd)
+        {
+            cache.remove(&oldest);
+        }
+    }
+}
+
+static IS_PREWARMING_WINDOWS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 pub fn prewarm_windows(hwnds: &[HWND]) {
     if IS_PREWARMING_WINDOWS.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -369,8 +385,16 @@ pub fn prewarm_windows(hwnds: &[HWND]) {
         let now = Instant::now();
         for h in list {
             let hwnd = HWND(h as *mut _);
-            if let Some(img) = capture_window_image(hwnd) {
-                FRAME_CACHE.lock().insert(h as isize, (now, img));
+            let needs_cap = {
+                let cache = FRAME_CACHE.lock();
+                cache
+                    .get(&(h as isize))
+                    .map_or(true, |(ts, _)| now.duration_since(*ts) >= FRAME_TTL)
+            };
+            if needs_cap {
+                if let Some(img) = capture_window_image_uncached(hwnd) {
+                    cache_frame(h as isize, Instant::now(), img);
+                }
             }
         }
         IS_PREWARMING_WINDOWS.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -380,21 +404,10 @@ pub fn prewarm_windows(hwnds: &[HWND]) {
 pub fn create_placeholder(_title: &str, width: u32, height: u32) -> ImageBuffer {
     let mut pixels = vec![0u8; (width * height * 4) as usize];
     for chunk in pixels.chunks_exact_mut(4) {
-        chunk[0] = 18;  // R
-        chunk[1] = 20;  // G
-        chunk[2] = 27;  // B
+        chunk[0] = 16; // R
+        chunk[1] = 18; // G
+        chunk[2] = 22; // B - Sleek neutral dark obsidian glass (no bright blue!)
         chunk[3] = 255; // A
-    }
-
-    let bar_height = (height / 18).clamp(6, 24);
-    for y in 0..bar_height {
-        for x in 0..width {
-            let idx = ((y * width + x) * 4) as usize;
-            pixels[idx] = 48;     // R
-            pixels[idx + 1] = 56; // G
-            pixels[idx + 2] = 78; // B
-            pixels[idx + 3] = 255;
-        }
     }
 
     ImageBuffer {
@@ -408,6 +421,7 @@ pub fn grab_screen_rect(x: i32, y: i32, w: i32, h: i32) -> Option<ImageBuffer> {
     if w <= 0 || h <= 0 {
         return None;
     }
+    let _lock = GDI_LOCK.lock();
     unsafe {
         let hdc_screen = GetDC(GetDesktopWindow());
         if hdc_screen.0.is_null() {
@@ -472,7 +486,13 @@ pub fn grab_screen_rect(x: i32, y: i32, w: i32, h: i32) -> Option<ImageBuffer> {
     }
 }
 
-fn crop_inner(img: &ImageBuffer, crop_x: u32, crop_y: u32, crop_w: u32, crop_h: u32) -> ImageBuffer {
+fn crop_inner(
+    img: &ImageBuffer,
+    crop_x: u32,
+    crop_y: u32,
+    crop_w: u32,
+    crop_h: u32,
+) -> ImageBuffer {
     let mut out = vec![0u8; (crop_w * crop_h * 4) as usize];
     let src_stride = (img.width * 4) as usize;
     let dst_stride = (crop_w * 4) as usize;
@@ -538,6 +558,10 @@ fn compose_over_backdrop(win: &ImageBuffer, dx: i32, dy: i32, ww: u32, wh: u32) 
 }
 
 pub fn capture_window_image(hwnd: HWND) -> Option<ImageBuffer> {
+    capture_window_image_timed(hwnd, Duration::from_millis(60))
+}
+
+pub fn capture_window_image_timed(hwnd: HWND, timeout: Duration) -> Option<ImageBuffer> {
     let raw = hwnd.0 as isize;
     let now = Instant::now();
     {
@@ -549,35 +573,40 @@ pub fn capture_window_image(hwnd: HWND) -> Option<ImageBuffer> {
         }
     }
 
-    let is_fg = unsafe {
-        GetForegroundWindow() == hwnd && !IsIconic(hwnd).as_bool()
-    };
-    if is_fg {
-        let img = capture_window_image_uncached(hwnd);
-        if let Some(ref buf) = img {
-            FRAME_CACHE.lock().insert(raw, (now, buf.clone()));
+    let ov_vis = OVERLAY_VISIBLE.load(std::sync::atomic::Ordering::Relaxed);
+    let is_fg = unsafe { GetForegroundWindow() == hwnd && !IsIconic(hwnd).as_bool() };
+    if is_fg && !ov_vis {
+        let (wx, wy, ww, wh) = work_area();
+        if let Some(buf) = grab_screen_rect(wx, wy, ww, wh) {
+            cache_frame(raw, now, buf.clone());
+            return Some(buf);
         }
-        return img;
     }
 
-    let raw_hwnd = hwnd.0 as usize;
+    // Run PrintWindow on a worker thread with strict timeout to prevent ANY UI thread freeze
     let (tx, rx) = crossbeam_channel::bounded::<Option<ImageBuffer>>(1);
+    let h_raw = hwnd.0 as usize;
     thread::spawn(move || {
-        let h = HWND(raw_hwnd as *mut _);
+        let h = HWND(h_raw as *mut _);
         let res = capture_window_image_uncached(h);
         let _ = tx.send(res);
     });
 
-    match rx.recv_timeout(Duration::from_millis(120)) {
+    match rx.recv_timeout(timeout) {
         Ok(Some(buf)) => {
-            FRAME_CACHE.lock().insert(raw, (now, buf.clone()));
+            cache_frame(raw, Instant::now(), buf.clone());
             Some(buf)
         }
         Ok(None) | Err(_) => {
-            let title = get_window_title_safe(hwnd);
-            let ph = create_placeholder(&title, 480, 300);
-            FRAME_CACHE.lock().insert(raw, (now, ph.clone()));
-            Some(ph)
+            // Timed out or unresponsive app: fallback to stale cached frame or placeholder
+            let stale = {
+                let cache = FRAME_CACHE.lock();
+                cache.get(&raw).map(|(_, img)| img.clone())
+            };
+            stale.or_else(|| {
+                let title = get_window_title_safe(hwnd);
+                Some(create_placeholder(&title, 480, 300))
+            })
         }
     }
 }
@@ -596,7 +625,7 @@ fn get_window_title_safe(hwnd: HWND) -> String {
     String::new()
 }
 
-fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
+pub fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
     if is_own_window(hwnd) {
         return Some(create_placeholder("AppSwitcher", 480, 300));
     }
@@ -621,29 +650,37 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
         let is_iconic = IsIconic(hwnd).as_bool();
         let is_fg = GetForegroundWindow() == hwnd;
         let is_maximized = IsZoomed(hwnd).as_bool();
+        let ov_vis = OVERLAY_VISIBLE.load(std::sync::atomic::Ordering::Relaxed);
 
-        // 1. Fast screen DC grab if foreground and not minimized
-        // 0.8ms screen grab — NEVER calls PrintWindow on active foreground window!
-        // Captures the exact screen at 1:1 pixel exactness!
-        if is_fg && !is_iconic {
+        // 1. Fast screen DC grab ONLY if foreground and our overlay is NOT currently shown!
+        if is_fg && !is_iconic && !ov_vis {
             if let Some(buf) = grab_screen_rect(wx, wy, ww, wh) {
                 return Some(buf);
             }
         }
 
-        // 2. Background window: PrintWindow (PW_RENDERFULLCONTENT = 2)
         if windows::Win32::UI::WindowsAndMessaging::IsHungAppWindow(hwnd).as_bool() {
             let title = get_window_title_safe(hwnd);
-            return Some(create_placeholder(&title, w.max(320) as u32, h.max(200) as u32));
+            return Some(create_placeholder(
+                &title,
+                w.max(320) as u32,
+                h.max(200) as u32,
+            ));
         }
 
-        let hdc_window = GetWindowDC(hwnd);
-        if !hdc_window.0.is_null() {
-            let hdc_mem = CreateCompatibleDC(hdc_window);
-            let hbm = CreateCompatibleBitmap(hdc_window, w, h);
+        // 2. Background or occluded window: PrintWindow using Screen-compatible DC (guarantees 32-bit color!)
+        let hdc_screen = GetDC(GetDesktopWindow());
+        if !hdc_screen.0.is_null() {
+            let hdc_mem = CreateCompatibleDC(hdc_screen);
+            let hbm = CreateCompatibleBitmap(hdc_screen, w, h);
             let old_obj = SelectObject(hdc_mem, hbm);
 
-            let printed = PrintWindow(hwnd, hdc_mem, 2).as_bool();
+            // Try PW_RENDERFULLCONTENT (2) first; fallback to standard PrintWindow (0)
+            let mut printed = PrintWindow(hwnd, hdc_mem, 2).as_bool();
+            if !printed {
+                printed = PrintWindow(hwnd, hdc_mem, 0).as_bool();
+            }
+
             if printed {
                 let mut bmi = BITMAPINFO {
                     bmiHeader: BITMAPINFOHEADER {
@@ -677,7 +714,7 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
 
                 let _ = DeleteObject(hbm);
                 let _ = DeleteDC(hdc_mem);
-                let _ = ReleaseDC(hwnd, hdc_window);
+                let _ = ReleaseDC(GetDesktopWindow(), hdc_screen);
 
                 if lines > 0 {
                     let mut non_black = false;
@@ -704,13 +741,17 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
                             if (w as u32) >= ww as u32 && (h as u32) >= wh as u32 {
                                 let crop_x = ((w as u32 - ww as u32) / 2).min(16);
                                 let crop_y = ((h as u32 - wh as u32) / 2).min(16);
-                                return Some(crop_inner(&raw_buf, crop_x, crop_y, ww as u32, wh as u32));
+                                return Some(crop_inner(
+                                    &raw_buf, crop_x, crop_y, ww as u32, wh as u32,
+                                ));
                             }
                             return Some(raw_buf);
                         } else {
                             let dx = rect.left - wx;
                             let dy = rect.top - wy;
-                            return Some(compose_over_backdrop(&raw_buf, dx, dy, ww as u32, wh as u32));
+                            return Some(compose_over_backdrop(
+                                &raw_buf, dx, dy, ww as u32, wh as u32,
+                            ));
                         }
                     }
                 }
@@ -718,17 +759,34 @@ fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
                 SelectObject(hdc_mem, old_obj);
                 let _ = DeleteObject(hbm);
                 let _ = DeleteDC(hdc_mem);
-                let _ = ReleaseDC(hwnd, hdc_window);
+                let _ = ReleaseDC(GetDesktopWindow(), hdc_screen);
             }
         }
 
-        let title = get_window_title_safe(hwnd);
-        Some(create_placeholder(&title, w.max(320) as u32, h.max(200) as u32))
+        // Some GPU-composited windows report success from PrintWindow while
+        // returning an all-black bitmap. When the window is actually visible,
+        // fall back to its current desktop pixels rather than showing a black
+        // preview. This path runs before the switcher overlay is revealed.
+        if !is_iconic && IsWindowVisible(hwnd).as_bool() {
+            let screen = grab_screen_rect(rect.left, rect.top, w, h);
+            if let Some(img) = screen {
+                let has_content = img
+                    .pixels
+                    .chunks_exact(4)
+                    .any(|p| p[0] > 12 || p[1] > 12 || p[2] > 12);
+                if has_content {
+                    let dx = rect.left - wx;
+                    let dy = rect.top - wy;
+                    return Some(compose_over_backdrop(&img, dx, dy, ww as u32, wh as u32));
+                }
+            }
+        }
+
+        None
     }
 }
 
-/// Capture multiple windows in parallel using detached worker threads and a strict deadline.
-/// Pumping messages during wait guarantees the application NEVER freezes or shows "Not Responding".
+/// Capture multiple windows in parallel with strict total deadline
 pub fn capture_windows_parallel(hwnds: &[HWND]) -> Vec<Option<ImageBuffer>> {
     let mut results = vec![None; hwnds.len()];
     let mut missing_indices = Vec::new();
@@ -752,38 +810,50 @@ pub fn capture_windows_parallel(hwnds: &[HWND]) -> Vec<Option<ImageBuffer>> {
         return results;
     }
 
+    // Capture missing in parallel across threads with 120ms total deadline
     let (tx, rx) = crossbeam_channel::unbounded::<(usize, Option<ImageBuffer>)>();
     for &idx in &missing_indices {
-        let hwnd_raw = hwnds[idx].0 as usize;
-        let tx_c = tx.clone();
+        let hwnd = hwnds[idx];
+        let tx_w = tx.clone();
+        let h_raw = hwnd.0 as usize;
         thread::spawn(move || {
-            let hwnd = HWND(hwnd_raw as *mut _);
-            let img = capture_window_image_uncached(hwnd);
-            let _ = tx_c.send((idx, img));
+            let h = HWND(h_raw as *mut _);
+            let img = capture_window_image_uncached(h);
+            let _ = tx_w.send((idx, img));
         });
     }
     drop(tx);
 
-    let deadline = Instant::now() + Duration::from_millis(180);
-    while let Ok((idx, opt_img)) = rx.recv_deadline(deadline) {
-        if let Some(ref buf) = opt_img {
-            FRAME_CACHE.lock().insert(hwnds[idx].0 as isize, (Instant::now(), buf.clone()));
+    let deadline = Instant::now() + Duration::from_millis(120);
+    while let Some(rem) = deadline.checked_duration_since(Instant::now()) {
+        if rem.is_zero() {
+            break;
         }
-        results[idx] = opt_img;
-
-        unsafe {
-            let mut msg = MSG::default();
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+        match rx.recv_timeout(rem) {
+            Ok((idx, Some(img))) => {
+                cache_frame(hwnds[idx].0 as isize, Instant::now(), img.clone());
+                results[idx] = Some(img);
             }
+            Ok((idx, None)) => {
+                let title = get_window_title_safe(hwnds[idx]);
+                results[idx] = Some(create_placeholder(&title, 480, 300));
+            }
+            Err(_) => break,
         }
     }
 
+    // Fill any that timed out with stale cache or instant placeholder
     for &idx in &missing_indices {
         if results[idx].is_none() {
-            let title = get_window_title_safe(hwnds[idx]);
-            results[idx] = Some(create_placeholder(&title, 480, 300));
+            let hwnd = hwnds[idx];
+            let stale = {
+                let cache = FRAME_CACHE.lock();
+                cache.get(&(hwnd.0 as isize)).map(|(_, img)| img.clone())
+            };
+            results[idx] = stale.or_else(|| {
+                let title = get_window_title_safe(hwnd);
+                Some(create_placeholder(&title, 480, 300))
+            });
         }
     }
 

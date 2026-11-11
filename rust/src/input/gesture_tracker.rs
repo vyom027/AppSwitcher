@@ -3,11 +3,11 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-pub const SWIPE_THRESHOLD: f64 = 260.0;
-pub const DWELL_SECS: f64 = 0.20;
-pub const PREWARM_SECS: f64 = 0.10;
-pub const MOVE_EPS: f64 = 18.0;
-pub const SPREAD_EPS: f64 = 12.0;
+pub const DEFAULT_SWIPE_THRESHOLD: f64 = 42.0;
+pub const DWELL_SECS: f64 = 0.35;
+pub const PREWARM_SECS: f64 = 0.12;
+pub const MOVE_EPS: f64 = 14.0;
+pub const SPREAD_EPS: f64 = 10.0;
 pub const PINCH_RATIO: f64 = 0.62;
 pub const PINCH_MIN_BASE: f64 = 120.0;
 pub const MIN_FINGERS: usize = 3;
@@ -20,6 +20,7 @@ pub struct Contact {
 }
 
 pub struct GestureTracker {
+    threshold: f64,
     active: bool,
     base_x: f64,
     base_y: f64,
@@ -41,7 +42,13 @@ pub struct GestureTracker {
 }
 
 impl GestureTracker {
-    pub fn new<S, H, A, P>(on_swipe: S, on_hold_swipe: H, on_arm: Option<A>, on_pinch: Option<P>) -> Self
+    pub fn new<S, H, A, P>(
+        threshold: f64,
+        on_swipe: S,
+        on_hold_swipe: H,
+        on_arm: Option<A>,
+        on_pinch: Option<P>,
+    ) -> Self
     where
         S: Fn(i32) + Send + Sync + 'static,
         H: Fn(i32) + Send + Sync + 'static,
@@ -49,6 +56,11 @@ impl GestureTracker {
         P: Fn() + Send + Sync + 'static,
     {
         Self {
+            threshold: if threshold > 30.0 {
+                threshold
+            } else {
+                DEFAULT_SWIPE_THRESHOLD
+            },
             active: false,
             base_x: 0.0,
             base_y: 0.0,
@@ -168,20 +180,21 @@ impl GestureTracker {
             return;
         }
 
-        // Swipe travel check: One 3-finger swipe stroke executes exactly ONE switch
-        // Fingers must lift and re-engage for subsequent swipes (eliminates multi-play glitch)
+        // Swipe travel check: Matches Python gesture_hook continuous stepping
+        // Moving past SWIPE_THRESHOLD switches apps, and resets base to allow continuous swiping without lifting
         let dx = avg_x - self.base_x;
         let dy = (avg_y - self.base_y).abs();
 
-        if !self.swiped && dx.abs() >= SWIPE_THRESHOLD && dy < dx.abs() * 0.9 {
+        if dx.abs() >= self.threshold
+            && dy < dx.abs() * 1.6
+            && now.duration_since(self.last_swipe).as_millis() >= 95
+        {
             let dir = if dx > 0.0 { 1 } else { -1 };
-            self.swiped = true;
             self.last_swipe = now;
-            (self.on_swipe)(dir);
             self.base_x = avg_x;
             self.base_y = avg_y;
             self.still_since = now;
+            (self.on_swipe)(dir);
         }
     }
 }
-

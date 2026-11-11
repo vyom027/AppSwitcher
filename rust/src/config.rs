@@ -54,7 +54,15 @@ impl Settings {
         if let Some(path) = Self::config_path() {
             if path.exists() {
                 if let Ok(data) = fs::read_to_string(&path) {
-                    if let Ok(settings) = serde_json::from_str::<Settings>(&data) {
+                    if let Ok(mut settings) = serde_json::from_str::<Settings>(&data) {
+                        // Removed picker styles may still be present in an older
+                        // settings file; point them at a supported layout.
+                        if !matches!(
+                            settings.layout.to_ascii_lowercase().as_str(),
+                            "dock" | "row" | "hero" | "expose_cloud" | "spotlight"
+                        ) {
+                            settings.layout = "dock".to_string();
+                        }
                         return settings;
                     }
                 }

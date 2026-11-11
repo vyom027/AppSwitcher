@@ -2,13 +2,11 @@
 
 use std::collections::HashMap;
 use windows::Win32::Devices::HumanInterfaceDevice::{
-    HidP_GetCaps, HidP_GetUsageValue, HidP_GetUsages, HidP_GetValueCaps,
-    HidP_Input, HIDP_CAPS, HIDP_STATUS_SUCCESS, HIDP_VALUE_CAPS, PHIDP_PREPARSED_DATA,
+    HidP_GetCaps, HidP_GetUsageValue, HidP_GetUsages, HidP_GetValueCaps, HidP_Input, HIDP_CAPS,
+    HIDP_STATUS_SUCCESS, HIDP_VALUE_CAPS, PHIDP_PREPARSED_DATA,
 };
 use windows::Win32::Foundation::HANDLE;
-use windows::Win32::UI::Input::{
-    GetRawInputDeviceInfoW, RIDI_PREPARSEDDATA,
-};
+use windows::Win32::UI::Input::{GetRawInputDeviceInfoW, RIDI_PREPARSEDDATA};
 
 pub const UP_GENERIC: u16 = 0x01;
 pub const U_X: u16 = 0x30;

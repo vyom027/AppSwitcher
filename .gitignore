@@ -11,4 +11,10 @@ _*.png
 .claude
 brag-output
 rust/target/
+rust/target-layout-redesign/
+rust/target-layouts-distinct/
+rust/target-liquid-glass/
+rust/target-settings-redesign/
+rust/target-settings-icon/
+rust/target-layout-restored/
 setup_rust.ps1

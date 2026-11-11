@@ -8,8 +8,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
-    SetForegroundWindow, ShowWindow, SwitchToThisWindow, SW_RESTORE,
+    BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, SetForegroundWindow,
+    ShowWindow, SwitchToThisWindow, SW_RESTORE,
 };
 
 pub fn is_own_window(hwnd: HWND) -> bool {
@@ -60,6 +60,7 @@ pub fn bring_to_front(hwnd: HWND) {
         return;
     }
     invalidate_window_cache();
+    crate::window::mru::note_focused(hwnd);
 
     unsafe {
         let _ = windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(0xFFFFFFFF);
