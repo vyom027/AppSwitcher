@@ -1,0 +1,36 @@
+name: Bug report
+description: Report a reproducible problem in the Rust app
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Choose a layout\n2. Swipe or press a shortcut\n3. Observe the problem"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: AppSwitcher version
+      placeholder: v2.0.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Windows version, touchpad, and display scaling
+      placeholder: Windows 11, Precision Touchpad, 150% scaling
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or recording
+      description: Attach media if it helps show the issue. Remove personal information first.
