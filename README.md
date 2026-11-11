@@ -8,7 +8,7 @@ AppSwitcher is a native Rust app switcher for Windows 11 precision touchpads. It
 
 The Rust version is available to try now. Download the EXE, use it with your normal apps, and tell us what feels good or needs work.
 
-- [Share your experience or suggest an idea](https://github.com/vyom027/AppSwitcher/discussions)
+- [Review AppSwitcher 2.0 and share your experience](https://github.com/vyom027/AppSwitcher/discussions/1)
 - [Report a bug](https://github.com/vyom027/AppSwitcher/issues/new/choose)
 - [Fork the code](https://github.com/vyom027/AppSwitcher/fork) and send a pull request; see [CONTRIBUTING.md](CONTRIBUTING.md)
 
