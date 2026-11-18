@@ -1,4 +1,5 @@
-use crate::layouts::{draw_contained_thumbnail, draw_liquid_glass, PickerLayout};
+use crate::layouts::{draw_contained_thumbnail, style, PickerLayout};
+use crate::render::d2d::{glyph, Align};
 use crate::render::d2d::D2DContext;
 use crate::window::enumerator::WindowInfo;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
@@ -83,97 +84,92 @@ impl PickerLayout for SpotlightLayout {
         }
         let panel = Self::panel(sw, sh);
         let ph = panel.bottom - panel.top;
-        draw_liquid_glass(d2d, panel, 22.0, accent, true);
+        style::surface(d2d, panel, 12.0, true);
 
-        d2d.draw_text(
-            "SPOTLIGHT",
+        style::label(
+            d2d,
+            "Spotlight",
             D2D_RECT_F {
                 left: panel.left + 26.0,
                 top: panel.top + 17.0,
                 right: panel.left + 220.0,
                 bottom: panel.top + 43.0,
             },
-            accent,
-            13.0,
-            true,
-            false,
+            style::TEXT1,
+            14.0,
+            600,
+            Align::Leading,
         );
-        d2d.draw_text(
-            "FIND A WINDOW",
+        style::label(
+            d2d,
+            "Find a window",
             D2D_RECT_F {
                 left: panel.right - 220.0,
                 top: panel.top + 19.0,
                 right: panel.right - 26.0,
                 bottom: panel.top + 42.0,
             },
-            D2D1_COLOR_F {
-                r: 0.65,
-                g: 0.72,
-                b: 0.84,
-                a: 0.86,
-            },
-            10.0,
-            true,
-            true,
+            style::TEXT3,
+            12.0,
+            400,
+            Align::Trailing,
         );
 
+        // Fluent search box: subtle fill, accent underline while focused.
         let search = D2D_RECT_F {
             left: panel.left + 24.0,
             top: panel.top + 52.0,
             right: panel.right - 24.0,
             bottom: panel.top + 88.0,
         };
-        draw_liquid_glass(d2d, search, 10.0, accent, true);
+        d2d.fill_rounded_rect(search, 6.0, style::rgba(0.0, 0.0, 0.0, 0.22));
+        d2d.draw_rounded_rect(search, 6.0, style::STROKE, 1.0);
+        d2d.fill_rounded_rect(
+            D2D_RECT_F {
+                left: search.left + 1.0,
+                top: search.bottom - 2.0,
+                right: search.right - 1.0,
+                bottom: search.bottom,
+            },
+            1.0,
+            accent,
+        );
+        d2d.icon(
+            glyph::SEARCH,
+            D2D_RECT_F {
+                left: search.left + 10.0,
+                right: search.left + 34.0,
+                ..search
+            },
+            style::TEXT2,
+            13.0,
+        );
         let query_text = if self.query.is_empty() {
             "Type to filter by window title…"
         } else {
             &self.query
         };
-        d2d.draw_text(
+        style::label(
+            d2d,
             query_text,
             D2D_RECT_F {
-                left: search.left + 15.0,
-                top: search.top + 4.0,
-                right: search.right - 55.0,
-                bottom: search.bottom - 4.0,
+                left: search.left + 40.0,
+                right: search.right - 60.0,
+                ..search
             },
-            if self.query.is_empty() {
-                D2D1_COLOR_F {
-                    r: 0.58,
-                    g: 0.64,
-                    b: 0.75,
-                    a: 0.9,
-                }
-            } else {
-                D2D1_COLOR_F {
-                    r: 0.96,
-                    g: 0.97,
-                    b: 1.0,
-                    a: 1.0,
-                }
-            },
+            if self.query.is_empty() { style::TEXT3 } else { style::TEXT1 },
             14.0,
-            !self.query.is_empty(),
-            false,
+            400,
+            Align::Leading,
         );
-        d2d.draw_text(
-            "ESC",
-            D2D_RECT_F {
-                left: search.right - 45.0,
-                top: search.top + 5.0,
-                right: search.right - 12.0,
-                bottom: search.bottom - 5.0,
-            },
-            D2D1_COLOR_F {
-                r: 0.58,
-                g: 0.64,
-                b: 0.75,
-                a: 0.9,
-            },
-            10.0,
-            true,
-            true,
-        );
+        let esc = D2D_RECT_F {
+            left: search.right - 46.0,
+            top: search.top + 7.0,
+            right: search.right - 10.0,
+            bottom: search.bottom - 7.0,
+        };
+        d2d.fill_rounded_rect(esc, 4.0, style::rgba(1.0, 1.0, 1.0, 0.08));
+        style::label(d2d, "Esc", esc, style::TEXT2, 11.0, 600, Align::Center);
 
         let matches = self.matches(windows);
         let (list, row_h, rows) = Self::list_geometry(panel);
@@ -195,40 +191,47 @@ impl PickerLayout for SpotlightLayout {
                 bottom: list.top + (row as f32 + 1.0) * row_h - 3.0,
             };
             let active = idx == self.selected;
-            draw_liquid_glass(d2d, r, 11.0, accent, active);
+            // Fluent list selection: soft fill plus an accent pill on the left.
+            if active {
+                d2d.fill_rounded_rect(r, 6.0, style::rgba(1.0, 1.0, 1.0, 0.08));
+                let cy = (r.top + r.bottom) * 0.5;
+                d2d.fill_rounded_rect(
+                    D2D_RECT_F {
+                        left: r.left,
+                        top: cy - 9.0,
+                        right: r.left + 3.0,
+                        bottom: cy + 9.0,
+                    },
+                    1.5,
+                    accent,
+                );
+            }
             if let Some(Some(icon)) = icons.get(idx) {
+                let cy = (r.top + r.bottom) * 0.5;
                 d2d.draw_bitmap(
                     icon,
                     D2D_RECT_F {
-                        left: r.left + 10.0,
-                        top: r.top + 11.0,
+                        left: r.left + 14.0,
+                        top: cy - 12.0,
                         right: r.left + 38.0,
-                        bottom: r.top + 39.0,
+                        bottom: cy + 12.0,
                     },
                     1.0,
                 );
             }
-            d2d.draw_text(
+            style::label(
+                d2d,
                 &windows[idx].title,
                 D2D_RECT_F {
                     left: r.left + 49.0,
-                    top: r.top + 8.0,
                     right: r.right - 9.0,
-                    bottom: r.bottom - 8.0,
+                    ..r
                 },
-                D2D1_COLOR_F {
-                    r: 0.93,
-                    g: 0.95,
-                    b: 0.99,
-                    a: 1.0,
-                },
-                12.5,
-                active,
-                false,
+                if active { style::TEXT1 } else { style::TEXT2 },
+                13.0,
+                if active { 600 } else { 400 },
+                Align::Leading,
             );
-            if active {
-                d2d.draw_rounded_rect(r, 11.0, accent, 1.7);
-            }
         }
         if matches.is_empty() {
             d2d.draw_text(
@@ -275,10 +278,12 @@ impl PickerLayout for SpotlightLayout {
             right: panel.right - 24.0,
             bottom: panel.bottom - 26.0,
         };
-        draw_liquid_glass(d2d, preview, 15.0, accent, true);
+        d2d.fill_rounded_rect(preview, 8.0, style::rgba(0.0, 0.0, 0.0, 0.18));
+        d2d.draw_rounded_rect(preview, 8.0, style::STROKE, 1.0);
         if let Some(selected) = matches.get(focus).copied() {
             let header_h = 54.0;
-            d2d.draw_text(
+            style::label(
+                d2d,
                 &windows[selected].title,
                 D2D_RECT_F {
                     left: preview.left + 16.0,
@@ -286,15 +291,10 @@ impl PickerLayout for SpotlightLayout {
                     right: preview.right - 16.0,
                     bottom: preview.top + 39.0,
                 },
-                D2D1_COLOR_F {
-                    r: 0.96,
-                    g: 0.97,
-                    b: 1.0,
-                    a: 1.0,
-                },
+                style::TEXT1,
                 15.0,
-                true,
-                false,
+                600,
+                Align::Leading,
             );
             draw_contained_thumbnail(
                 d2d,
@@ -307,7 +307,6 @@ impl PickerLayout for SpotlightLayout {
                 bitmaps.get(selected).and_then(Option::as_ref),
                 1.0,
             );
-            d2d.draw_rounded_rect(preview, 15.0, accent, 1.5);
         } else {
             d2d.draw_text(
                 "Your preview appears here",
@@ -329,9 +328,9 @@ impl PickerLayout for SpotlightLayout {
             );
         }
         let count = format!(
-            "{} MATCH{}",
+            "{} {}",
             matches.len(),
-            if matches.len() == 1 { "" } else { "ES" }
+            if matches.len() == 1 { "match" } else { "matches" }
         );
         d2d.draw_text(
             &count,
@@ -341,14 +340,9 @@ impl PickerLayout for SpotlightLayout {
                 right: panel.left + 240.0,
                 bottom: panel.bottom - 8.0,
             },
-            D2D1_COLOR_F {
-                r: 0.56,
-                g: 0.63,
-                b: 0.75,
-                a: 0.84,
-            },
-            9.5,
-            true,
+            style::TEXT3,
+            11.5,
+            false,
             false,
         );
     }

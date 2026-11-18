@@ -928,8 +928,26 @@ impl OverlayWindow {
                 self.d2d.clear(0.04, 0.05, 0.08, eased_alpha);
             }
 
-            // Top Pill Badge (Refined Liquid Glass Capsule)
-            let pill_w = (hint_text.len() as f32 * 6.8 + 32.0).clamp(260.0, 600.0);
+            // Light dim over the blurred desktop so cards and text stand out.
+            self.d2d.fill_rect(
+                D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: sw,
+                    bottom: sh,
+                },
+                D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.22 * eased_alpha,
+                },
+            );
+
+            // Hint bar, sized to its text
+            let pill_w = (self.d2d.measure(&hint_text, 12.0, 400, crate::render::d2d::Font::Text)
+                + 40.0)
+                .clamp(260.0, sw - 40.0);
             let pill_rect = D2D_RECT_F {
                 left: (sw - pill_w) * 0.5,
                 top: 14.0,
@@ -937,18 +955,19 @@ impl OverlayWindow {
                 bottom: 40.0,
             };
             draw_liquid_glass(&self.d2d, pill_rect, 13.0, accent, false);
-            self.d2d.draw_text(
+            self.d2d.text(
                 &hint_text,
                 pill_rect,
                 D2D1_COLOR_F {
-                    r: 0.88,
-                    g: 0.90,
-                    b: 0.95,
-                    a: 0.90 * eased_alpha,
+                    r: 0.80,
+                    g: 0.82,
+                    b: 0.86,
+                    a: eased_alpha,
                 },
-                11.0,
-                false,
-                true,
+                12.0,
+                400,
+                crate::render::d2d::Font::Text,
+                crate::render::d2d::Align::Center,
             );
 
             layout.render(&self.d2d, &windows, &bitmaps, &icons, accent, sw, sh);

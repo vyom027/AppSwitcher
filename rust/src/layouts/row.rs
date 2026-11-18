@@ -1,4 +1,5 @@
-use crate::layouts::{draw_contained_thumbnail, draw_liquid_glass, PickerLayout};
+use crate::layouts::{draw_contained_thumbnail, style, PickerLayout};
+use crate::render::d2d::Align;
 use crate::render::d2d::D2DContext;
 use crate::window::enumerator::WindowInfo;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
@@ -62,12 +63,7 @@ impl PickerLayout for RowLayout {
                 right: sw * 0.94,
                 bottom: sh * 0.792,
             },
-            D2D1_COLOR_F {
-                r: 0.75,
-                g: 0.82,
-                b: 0.94,
-                a: 0.22,
-            },
+            style::rgba(1.0, 1.0, 1.0, 0.08),
         );
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by(|a, b| {
@@ -79,80 +75,52 @@ impl PickerLayout for RowLayout {
                 continue;
             }
             let selected = i == self.selected;
-            let radius = if selected { 6.0 } else { 3.0 };
-            d2d.fill_rounded_rect(
-                D2D_RECT_F {
-                    left: r.left + 5.0,
-                    top: r.top + 8.0,
-                    right: r.right + 5.0,
-                    bottom: r.bottom + 8.0,
-                },
-                radius,
-                D2D1_COLOR_F {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: 0.55,
-                },
-            );
-            draw_liquid_glass(d2d, r, radius, accent, selected);
+            let radius = 8.0;
+            style::shadow(d2d, r, radius);
+            d2d.fill_rounded_rect(r, radius, style::THUMB_BG);
             draw_contained_thumbnail(
                 d2d,
                 D2D_RECT_F {
-                    left: r.left + 3.0,
-                    top: r.top + 3.0,
-                    right: r.right - 3.0,
-                    bottom: r.bottom - 3.0,
+                    left: r.left + 1.0,
+                    top: r.top + 1.0,
+                    right: r.right - 1.0,
+                    bottom: r.bottom - 1.0,
                 },
                 bitmaps.get(i).and_then(Option::as_ref),
-                if selected { 1.0 } else { 0.82 },
+                if selected { 1.0 } else { 0.72 },
             );
             if selected {
-                d2d.draw_rounded_rect(r, radius, accent, 3.0);
-                let title = &windows[i].title;
-                d2d.draw_text(
-                    title,
+                style::selection(d2d, r, radius, accent);
+                style::label(
+                    d2d,
+                    &windows[i].title,
                     D2D_RECT_F {
                         left: r.left + 18.0,
                         top: r.bottom + 12.0,
                         right: r.right - 18.0,
                         bottom: r.bottom + 42.0,
                     },
-                    D2D1_COLOR_F {
-                        r: 0.96,
-                        g: 0.97,
-                        b: 1.0,
-                        a: 1.0,
-                    },
-                    17.0,
-                    true,
-                    true,
+                    style::TEXT1,
+                    16.0,
+                    600,
+                    Align::Center,
                 );
                 if let Some(Some(icon)) = icons.get(i) {
-                    d2d.draw_bitmap(
+                    style::icon_tile(
+                        d2d,
                         icon,
                         D2D_RECT_F {
-                            left: r.left + 16.0,
-                            top: r.top + 16.0,
-                            right: r.left + 56.0,
-                            bottom: r.top + 56.0,
+                            left: r.left + 14.0,
+                            top: r.top + 14.0,
+                            right: r.left + 54.0,
+                            bottom: r.top + 54.0,
                         },
-                        1.0,
                     );
                 }
             } else {
-                d2d.draw_rounded_rect(
-                    r,
-                    radius,
-                    D2D1_COLOR_F {
-                        r: 0.72,
-                        g: 0.80,
-                        b: 0.92,
-                        a: 0.25,
-                    },
-                    1.0,
-                );
-                d2d.draw_text(
+                style::frame(d2d, r, radius);
+                style::label(
+                    d2d,
                     &windows[i].title,
                     D2D_RECT_F {
                         left: r.left + 8.0,
@@ -160,30 +128,26 @@ impl PickerLayout for RowLayout {
                         right: r.right - 8.0,
                         bottom: r.bottom + 32.0,
                     },
-                    D2D1_COLOR_F {
-                        r: 0.76,
-                        g: 0.82,
-                        b: 0.92,
-                        a: 0.82,
-                    },
-                    11.0,
-                    false,
-                    true,
+                    style::TEXT2,
+                    12.0,
+                    400,
+                    Align::Center,
                 );
             }
         }
-        d2d.draw_text(
-            "PANORAMA",
+        style::label(
+            d2d,
+            "Panorama",
             D2D_RECT_F {
                 left: 26.0,
                 top: 18.0,
                 right: 260.0,
                 bottom: 42.0,
             },
-            accent,
-            12.0,
-            true,
-            false,
+            style::TEXT2,
+            13.0,
+            600,
+            Align::Leading,
         );
     }
     fn hit_test(

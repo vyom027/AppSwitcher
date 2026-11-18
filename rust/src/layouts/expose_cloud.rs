@@ -1,4 +1,5 @@
-use crate::layouts::{draw_contained_thumbnail, draw_liquid_glass, PickerLayout};
+use crate::layouts::{draw_contained_thumbnail, style, PickerLayout};
+use crate::render::d2d::Align;
 use crate::render::d2d::D2DContext;
 use crate::window::enumerator::WindowInfo;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
@@ -94,7 +95,7 @@ impl PickerLayout for ExposeCloudLayout {
         let neighbors = Self::neighbors(self.selected, windows.len());
         for (slot, &idx) in neighbors.iter().enumerate() {
             let r = Self::card_rect(slot, sw, sh);
-            draw_liquid_glass(d2d, r, 12.0, accent, false);
+            style::surface(d2d, r, 8.0, false);
             draw_contained_thumbnail(
                 d2d,
                 D2D_RECT_F {
@@ -106,66 +107,36 @@ impl PickerLayout for ExposeCloudLayout {
                 bitmaps.get(idx).and_then(Option::as_ref),
                 0.82,
             );
-            d2d.fill_rounded_rect(
-                D2D_RECT_F {
-                    left: r.left + 4.0,
-                    top: r.bottom - 31.0,
-                    right: r.right - 4.0,
-                    bottom: r.bottom - 4.0,
-                },
-                0.0,
-                D2D1_COLOR_F {
-                    r: 0.025,
-                    g: 0.032,
-                    b: 0.048,
-                    a: 0.55,
-                },
-            );
             if let Some(Some(icon)) = icons.get(idx) {
                 d2d.draw_bitmap(
                     icon,
                     D2D_RECT_F {
                         left: r.left + 9.0,
-                        top: r.bottom - 25.0,
-                        right: r.left + 27.0,
-                        bottom: r.bottom - 7.0,
+                        top: r.bottom - 24.0,
+                        right: r.left + 25.0,
+                        bottom: r.bottom - 8.0,
                     },
-                    0.95,
+                    1.0,
                 );
             }
-            d2d.draw_text(
+            style::label(
+                d2d,
                 &windows[idx].title,
                 D2D_RECT_F {
                     left: r.left + 32.0,
                     top: r.bottom - 28.0,
-                    right: r.right - 7.0,
-                    bottom: r.bottom - 5.0,
+                    right: r.right - 8.0,
+                    bottom: r.bottom - 4.0,
                 },
-                D2D1_COLOR_F {
-                    r: 0.86,
-                    g: 0.89,
-                    b: 0.95,
-                    a: 0.94,
-                },
-                11.0,
-                false,
-                false,
-            );
-            d2d.draw_rounded_rect(
-                r,
+                style::TEXT2,
                 12.0,
-                D2D1_COLOR_F {
-                    r: 0.76,
-                    g: 0.83,
-                    b: 0.94,
-                    a: 0.24,
-                },
-                1.0,
+                400,
+                Align::Leading,
             );
         }
 
         let hero = Self::hero_rect(sw, sh);
-        draw_liquid_glass(d2d, hero, 18.0, accent, true);
+        style::surface(d2d, hero, 10.0, true);
         draw_contained_thumbnail(
             d2d,
             D2D_RECT_F {
@@ -177,74 +148,60 @@ impl PickerLayout for ExposeCloudLayout {
             bitmaps.get(self.selected).and_then(Option::as_ref),
             1.0,
         );
-        d2d.fill_rounded_rect(
-            D2D_RECT_F {
-                left: hero.left + 5.0,
-                top: hero.bottom - 48.0,
-                right: hero.right - 5.0,
-                bottom: hero.bottom - 5.0,
-            },
-            0.0,
-            D2D1_COLOR_F {
-                r: 0.02,
-                g: 0.028,
-                b: 0.044,
-                a: 0.55,
-            },
-        );
-        d2d.draw_text(
+        if let Some(Some(icon)) = icons.get(self.selected) {
+            d2d.draw_bitmap(
+                icon,
+                D2D_RECT_F {
+                    left: hero.left + 16.0,
+                    top: hero.bottom - 37.0,
+                    right: hero.left + 38.0,
+                    bottom: hero.bottom - 15.0,
+                },
+                1.0,
+            );
+        }
+        style::label(
+            d2d,
             &windows[self.selected].title,
             D2D_RECT_F {
-                left: hero.left + 18.0,
+                left: hero.left + 48.0,
                 top: hero.bottom - 44.0,
                 right: hero.right - 18.0,
-                bottom: hero.bottom - 10.0,
+                bottom: hero.bottom - 8.0,
             },
-            D2D1_COLOR_F {
-                r: 0.97,
-                g: 0.98,
-                b: 1.0,
-                a: 1.0,
-            },
-            16.0,
-            true,
-            false,
+            style::TEXT1,
+            15.0,
+            600,
+            Align::Leading,
         );
-        d2d.draw_rounded_rect(hero, 18.0, accent, 2.5);
-        d2d.draw_text(
-            "EXPOSÉ CLOUD",
+        style::selection(d2d, hero, 10.0, accent);
+        style::label(
+            d2d,
+            "Exposé",
             D2D_RECT_F {
                 left: 28.0,
                 top: 16.0,
                 right: 250.0,
                 bottom: 40.0,
             },
-            accent,
-            12.0,
-            true,
-            false,
+            style::TEXT2,
+            13.0,
+            600,
+            Align::Leading,
         );
-        d2d.draw_text(
-            &format!(
-                "{:02} / {:02}  ·  NEARBY WINDOWS",
-                neighbors.len() + 1,
-                windows.len()
-            ),
+        style::label(
+            d2d,
+            &format!("{} of {} windows", neighbors.len() + 1, windows.len()),
             D2D_RECT_F {
                 left: sw - 300.0,
                 top: 16.0,
                 right: sw - 28.0,
                 bottom: 40.0,
             },
-            D2D1_COLOR_F {
-                r: 0.78,
-                g: 0.84,
-                b: 0.94,
-                a: 0.86,
-            },
-            11.0,
-            false,
-            true,
+            style::TEXT3,
+            12.0,
+            400,
+            Align::Trailing,
         );
     }
 

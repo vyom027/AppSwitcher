@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-use windows::core::{w, Interface};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use windows::core::{w, Interface, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
@@ -13,13 +15,57 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_PRESENT_OPTIONS_IMMEDIATELY, D2D1_RENDER_TARGET_PROPERTIES, D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_WEIGHT_BOLD,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS,
+    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
+use windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_CLIP;
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
 };
+
+/// Font roles for `D2DContext::text`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Font {
+    /// Segoe UI Variable Text: body copy and controls.
+    Text,
+    /// Segoe UI Variable Display: large titles.
+    Display,
+    /// Segoe Fluent Icons (Windows 11) or Segoe MDL2 Assets (Windows 10).
+    Icons,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Align {
+    Leading,
+    Center,
+    Trailing,
+}
+
+/// Common Fluent icon glyphs (same code points in both icon fonts).
+pub mod glyph {
+    pub const CHEVRON_DOWN: char = '\u{E70D}';
+    pub const CHEVRON_UP: char = '\u{E70E}';
+    pub const CHEVRON_LEFT: char = '\u{E76B}';
+    pub const CHEVRON_RIGHT: char = '\u{E76C}';
+    pub const CLOSE: char = '\u{E8BB}';
+    pub const REFRESH: char = '\u{E72C}';
+    pub const WARNING: char = '\u{E7BA}';
+    pub const CHECK: char = '\u{E73E}';
+    pub const PLAY: char = '\u{E768}';
+    pub const VIEW_ALL: char = '\u{E8A9}';
+    pub const PERSONALIZE: char = '\u{E771}';
+    pub const SPEED: char = '\u{EC4A}';
+    pub const HIDE: char = '\u{ED1A}';
+    pub const VIEW: char = '\u{E890}';
+    pub const KEYBOARD: char = '\u{E765}';
+    pub const SEARCH: char = '\u{E721}';
+}
+
+type FormatKey = (Font, u32, u32, Align, bool);
 
 pub struct D2DContext {
     pub factory: ID2D1Factory,
@@ -27,6 +73,9 @@ pub struct D2DContext {
     pub target: ID2D1HwndRenderTarget,
     pub rt: ID2D1RenderTarget,
     pub brush: ID2D1SolidColorBrush,
+    /// Text formats are expensive to create; cache them per style.
+    formats: RefCell<HashMap<FormatKey, IDWriteTextFormat>>,
+    icon_family: Vec<u16>,
 }
 
 unsafe impl Send for D2DContext {}
@@ -66,12 +115,15 @@ impl D2DContext {
                 None,
             )?;
 
+            let icon_family = pick_icon_family(&dwrite);
             Ok(Self {
                 factory,
                 dwrite,
                 target,
                 rt,
                 brush,
+                formats: RefCell::new(HashMap::new()),
+                icon_family,
             })
         }
     }
@@ -136,6 +188,8 @@ impl D2DContext {
         }
     }
 
+    /// Legacy text helper used by the picker layouts: one line, trimmed with
+    /// an ellipsis. `center` centres both ways; otherwise text is top-left.
     pub fn draw_text(
         &self,
         text: &str,
@@ -145,41 +199,154 @@ impl D2DContext {
         bold: bool,
         center: bool,
     ) {
+        let weight = if bold { 600 } else { 400 };
+        let align = if center { Align::Center } else { Align::Leading };
+        let Some(format) = self.format(Font::Text, font_size, weight, align, center) else {
+            return;
+        };
+        let wide: Vec<u16> = text.encode_utf16().collect();
         unsafe {
-            let font_weight = if bold {
-                DWRITE_FONT_WEIGHT_BOLD
-            } else {
-                DWRITE_FONT_WEIGHT_NORMAL
+            self.brush.SetColor(&color);
+            self.rt.DrawText(
+                &wide,
+                &format,
+                &rect,
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+
+    fn format(
+        &self,
+        font: Font,
+        size: f32,
+        weight: u32,
+        align: Align,
+        vcenter: bool,
+    ) -> Option<IDWriteTextFormat> {
+        let key = (font, (size * 100.0) as u32, weight, align, vcenter);
+        if let Some(f) = self.formats.borrow().get(&key) {
+            return Some(f.clone());
+        }
+        unsafe {
+            let family: Vec<u16> = match font {
+                Font::Text => "Segoe UI Variable Text\0".encode_utf16().collect(),
+                Font::Display => "Segoe UI Variable Display\0".encode_utf16().collect(),
+                Font::Icons => self.icon_family.clone(),
             };
+            let format = self
+                .dwrite
+                .CreateTextFormat(
+                    PCWSTR(family.as_ptr()),
+                    None,
+                    DWRITE_FONT_WEIGHT(weight as i32),
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    size,
+                    w!("en-us"),
+                )
+                .ok()?;
+            let _ = format.SetTextAlignment(match align {
+                Align::Leading => DWRITE_TEXT_ALIGNMENT_LEADING,
+                Align::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
+                Align::Trailing => DWRITE_TEXT_ALIGNMENT_TRAILING,
+            });
+            let _ = format.SetParagraphAlignment(if vcenter {
+                DWRITE_PARAGRAPH_ALIGNMENT_CENTER
+            } else {
+                DWRITE_PARAGRAPH_ALIGNMENT_NEAR
+            });
+            let _ = format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            if let Ok(sign) = self.dwrite.CreateEllipsisTrimmingSign(&format) {
+                let trimming = DWRITE_TRIMMING {
+                    granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                    delimiter: 0,
+                    delimiterCount: 0,
+                };
+                let _ = format.SetTrimming(&trimming, &sign);
+            }
+            self.formats.borrow_mut().insert(key, format.clone());
+            Some(format)
+        }
+    }
 
-            if let Ok(format) = self.dwrite.CreateTextFormat(
-                w!("Segoe UI Variable Display"),
-                None,
-                font_weight,
-                windows::Win32::Graphics::DirectWrite::DWRITE_FONT_STYLE_NORMAL,
-                windows::Win32::Graphics::DirectWrite::DWRITE_FONT_STRETCH_NORMAL,
-                font_size,
-                w!("en-us"),
-            ) {
-                if center {
-                    let _ = format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                    let _ = format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                } else {
-                    let _ = format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    /// Single-line text, vertically centred in `rect`, trimmed with an
+    /// ellipsis when it doesn't fit. `weight` is a CSS-style weight (400, 600).
+    pub fn text(
+        &self,
+        text: &str,
+        rect: D2D_RECT_F,
+        color: D2D1_COLOR_F,
+        size: f32,
+        weight: u32,
+        font: Font,
+        align: Align,
+    ) {
+        let Some(format) = self.format(font, size, weight, align, true) else {
+            return;
+        };
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        unsafe {
+            self.brush.SetColor(&color);
+            self.rt.DrawText(
+                &wide,
+                &format,
+                &rect,
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+
+    /// Draw an icon glyph centred in `rect`.
+    pub fn icon(&self, glyph: char, rect: D2D_RECT_F, color: D2D1_COLOR_F, size: f32) {
+        let mut buf = [0u8; 4];
+        self.text(
+            glyph.encode_utf8(&mut buf),
+            rect,
+            color,
+            size,
+            400,
+            Font::Icons,
+            Align::Center,
+        );
+    }
+
+    /// Width in DIPs of `text` on one line.
+    pub fn measure(&self, text: &str, size: f32, weight: u32, font: Font) -> f32 {
+        let Some(format) = self.format(font, size, weight, Align::Leading, true) else {
+            return 0.0;
+        };
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        unsafe {
+            match self.dwrite.CreateTextLayout(&wide, &format, 10_000.0, 1_000.0) {
+                Ok(layout) => {
+                    let mut metrics = DWRITE_TEXT_METRICS::default();
+                    if layout.GetMetrics(&mut metrics).is_ok() {
+                        metrics.widthIncludingTrailingWhitespace
+                    } else {
+                        0.0
+                    }
                 }
-
-                let wide: Vec<u16> = text.encode_utf16().collect();
-                self.brush.SetColor(&color);
-                self.rt.DrawText(
-                    &wide,
-                    &format,
-                    &rect,
-                    &self.brush,
-                    windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                );
+                Err(_) => 0.0,
             }
         }
+    }
+
+    pub fn fill_circle(&self, cx: f32, cy: f32, radius: f32, color: D2D1_COLOR_F) {
+        self.fill_rounded_rect(
+            D2D_RECT_F {
+                left: cx - radius,
+                top: cy - radius,
+                right: cx + radius,
+                bottom: cy + radius,
+            },
+            radius,
+            color,
+        );
     }
 
     pub fn create_bitmap_from_rgba(
@@ -336,4 +503,28 @@ impl D2DContext {
             self.rt.SetTransform(&identity);
         }
     }
+}
+
+/// Segoe Fluent Icons ships with Windows 11; Windows 10 has the older
+/// Segoe MDL2 Assets with the same code points for the glyphs we use.
+fn pick_icon_family(dwrite: &IDWriteFactory) -> Vec<u16> {
+    let fluent = "Segoe Fluent Icons";
+    unsafe {
+        let mut collection: Option<IDWriteFontCollection> = None;
+        if dwrite.GetSystemFontCollection(&mut collection, false).is_ok() {
+            if let Some(collection) = collection {
+                let name: Vec<u16> = format!("{fluent}\0").encode_utf16().collect();
+                let mut index = 0u32;
+                let mut exists = windows::Win32::Foundation::BOOL(0);
+                if collection
+                    .FindFamilyName(PCWSTR(name.as_ptr()), &mut index, &mut exists)
+                    .is_ok()
+                    && exists.as_bool()
+                {
+                    return name;
+                }
+            }
+        }
+    }
+    "Segoe MDL2 Assets\0".encode_utf16().collect()
 }

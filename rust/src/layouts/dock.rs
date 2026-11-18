@@ -1,4 +1,4 @@
-use crate::layouts::PickerLayout;
+use crate::layouts::{style, PickerLayout};
 use crate::render::d2d::D2DContext;
 use crate::window::enumerator::WindowInfo;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
@@ -101,139 +101,33 @@ impl PickerLayout for DockLayout {
             bottom: prev_top + ph,
         };
 
-        // Ambient colored glow behind the preview card
-        d2d.draw_glow(prev_rect, 20.0, accent, 5);
-
-        // Preview card dark glass background
-        d2d.fill_rounded_rect(
-            prev_rect,
-            20.0,
-            D2D1_COLOR_F {
-                r: 0.08,
-                g: 0.10,
-                b: 0.14,
-                a: 0.96,
-            },
-        );
-
-        // Preview thumbnail with true antialiased 20px rounded corners
+        // Preview card: soft shadow, neutral fill, hairline frame.
+        style::shadow(d2d, prev_rect, 12.0);
+        d2d.fill_rounded_rect(prev_rect, 12.0, style::THUMB_BG);
         if self.selected < bitmaps.len() {
             if let Some(ref bmp) = bitmaps[self.selected] {
-                d2d.fill_rounded_bitmap(bmp, prev_rect, 20.0, 1.0);
+                d2d.fill_rounded_bitmap(bmp, prev_rect, 12.0, 1.0);
             }
         }
+        d2d.draw_rounded_rect(prev_rect, 12.0, style::rgba(1.0, 1.0, 1.0, 0.14), 1.0);
 
-        // Preview card accent outline
-        d2d.draw_rounded_rect(prev_rect, 20.0, accent, 2.5);
-
-        // Preview card app icon badge
-        if self.selected < icons.len() {
-            if let Some(ref icon_bmp) = icons[self.selected] {
-                let badge_rect = D2D_RECT_F {
-                    left: prev_left + 16.0,
-                    top: prev_top + 16.0,
-                    right: prev_left + 54.0,
-                    bottom: prev_top + 54.0,
-                };
-                d2d.fill_rounded_rect(
-                    badge_rect,
-                    10.0,
-                    D2D1_COLOR_F {
-                        r: 0.04,
-                        g: 0.05,
-                        b: 0.08,
-                        a: 0.88,
-                    },
-                );
-                d2d.draw_rounded_rect(
-                    badge_rect,
-                    10.0,
-                    D2D1_COLOR_F {
-                        r: 1.0,
-                        g: 1.0,
-                        b: 1.0,
-                        a: 0.22,
-                    },
-                    1.0,
-                );
-                let ic_rect = D2D_RECT_F {
-                    left: badge_rect.left + 5.0,
-                    top: badge_rect.top + 5.0,
-                    right: badge_rect.right - 5.0,
-                    bottom: badge_rect.bottom - 5.0,
-                };
-                d2d.draw_bitmap(icon_bmp, ic_rect, 1.0);
-            }
+        if let Some(Some(icon_bmp)) = icons.get(self.selected) {
+            style::icon_tile(
+                d2d,
+                icon_bmp,
+                D2D_RECT_F {
+                    left: prev_left + 14.0,
+                    top: prev_top + 14.0,
+                    right: prev_left + 50.0,
+                    bottom: prev_top + 50.0,
+                },
+            );
         }
 
-        // Subtle Apple-style mirror reflection strictly confined above title
-        let refl_top = prev_top + ph + 4.0;
-        let max_refl_h = (title_y - refl_top - 4.0).max(0.0);
-        let refl_h = (ph * 0.18).min(max_refl_h).min(45.0);
-        if refl_h > 4.0 && self.selected < bitmaps.len() {
-            if let Some(ref bmp) = bitmaps[self.selected] {
-                let refl_rect = D2D_RECT_F {
-                    left: prev_left,
-                    top: refl_top,
-                    right: prev_left + pw,
-                    bottom: refl_top + refl_h,
-                };
-                d2d.fill_rounded_bitmap(bmp, refl_rect, 10.0, 0.16);
-            }
+        // ── 3. Active window title ─────────────────────────────────────────
+        if let Some(w) = windows.get(self.selected) {
+            style::title_pill(d2d, &w.title, None, sw * 0.5, title_y, 34.0, (sw * 0.70).min(650.0));
         }
-
-        // ── 3. Active Window Title (Refined Liquid Glass Capsule centered above dock) ───────────
-        let title = if self.selected < windows.len() {
-            let t = &windows[self.selected].title;
-            if t.chars().count() > 56 {
-                format!("{}...", t.chars().take(56).collect::<String>())
-            } else {
-                t.clone()
-            }
-        } else {
-            String::new()
-        };
-        let title_w = (title.len() as f32 * 9.5 + 48.0).clamp(240.0, (sw * 0.70).min(650.0));
-        let title_rect = D2D_RECT_F {
-            left: (sw - title_w) * 0.5,
-            top: title_y,
-            right: (sw + title_w) * 0.5,
-            bottom: title_y + 34.0,
-        };
-        d2d.fill_rounded_rect(
-            title_rect,
-            17.0,
-            D2D1_COLOR_F {
-                r: 0.05,
-                g: 0.07,
-                b: 0.10,
-                a: 0.84,
-            },
-        );
-        d2d.draw_rounded_rect(
-            title_rect,
-            17.0,
-            D2D1_COLOR_F {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 0.14,
-            },
-            1.0,
-        );
-        d2d.draw_text(
-            &title,
-            title_rect,
-            D2D1_COLOR_F {
-                r: 0.96,
-                g: 0.97,
-                b: 1.0,
-                a: 1.0,
-            },
-            14.5,
-            true,
-            true,
-        );
 
         // ── 4. Bottom Floating Dock Shelf ────────────────────────────────────
         let mut widths = Vec::with_capacity(n);
@@ -259,29 +153,7 @@ impl PickerLayout for DockLayout {
             bottom: base_y + 12.0,
         };
 
-        // Dark glass shelf fill
-        d2d.fill_rounded_rect(
-            shelf_rect,
-            22.0,
-            D2D1_COLOR_F {
-                r: 0.06,
-                g: 0.08,
-                b: 0.11,
-                a: 0.78,
-            },
-        );
-        // Subtle frosted border
-        d2d.draw_rounded_rect(
-            shelf_rect,
-            22.0,
-            D2D1_COLOR_F {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 0.14,
-            },
-            1.5,
-        );
+        style::surface(d2d, shelf_rect, 18.0, false);
 
         // ── 5. Render Dock Cards ─────────────────────────────────────────────
         for i in 0..n {
@@ -299,86 +171,28 @@ impl PickerLayout for DockLayout {
 
             let is_sel = i == self.selected;
 
-            if is_sel {
-                d2d.draw_glow(card_rect, 14.0, accent, 3);
+            d2d.fill_rounded_rect(card_rect, 8.0, style::THUMB_BG);
+            if let Some(Some(bmp)) = bitmaps.get(i) {
+                d2d.fill_rounded_bitmap(bmp, card_rect, 8.0, if is_sel { 1.0 } else { 0.72 });
             }
-
-            // Card background
-            d2d.fill_rounded_rect(
-                card_rect,
-                14.0,
-                D2D1_COLOR_F {
-                    r: 0.09,
-                    g: 0.11,
-                    b: 0.15,
-                    a: if is_sel { 1.0 } else { 0.80 },
-                },
-            );
-
-            // Thumbnail with antialiased 14px rounded corners
-            if i < bitmaps.len() {
-                if let Some(ref bmp) = bitmaps[i] {
-                    d2d.fill_rounded_bitmap(bmp, card_rect, 14.0, if is_sel { 1.0 } else { 0.80 });
-                }
-            }
-
-            // Card outline
             if is_sel {
-                d2d.draw_rounded_rect(card_rect, 14.0, accent, 2.5);
+                style::selection(d2d, card_rect, 8.0, accent);
             } else {
-                d2d.draw_rounded_rect(
-                    card_rect,
-                    14.0,
-                    D2D1_COLOR_F {
-                        r: 1.0,
-                        g: 1.0,
-                        b: 1.0,
-                        a: 0.10,
-                    },
-                    1.0,
-                );
+                style::frame(d2d, card_rect, 8.0);
             }
 
-            // App icon badge
-            if i < icons.len() {
-                if let Some(ref icon_bmp) = icons[i] {
-                    let b_size = (20.0 * m).clamp(20.0, 32.0);
-                    let b_pad = 3.0;
-                    let b_rect = D2D_RECT_F {
+            if let Some(Some(icon_bmp)) = icons.get(i) {
+                let b = (22.0 * m).clamp(22.0, 34.0);
+                style::icon_tile(
+                    d2d,
+                    icon_bmp,
+                    D2D_RECT_F {
                         left: card_rect.left + 8.0,
                         top: card_rect.top + 8.0,
-                        right: card_rect.left + 8.0 + b_size + b_pad * 2.0,
-                        bottom: card_rect.top + 8.0 + b_size + b_pad * 2.0,
-                    };
-                    d2d.fill_rounded_rect(
-                        b_rect,
-                        6.0,
-                        D2D1_COLOR_F {
-                            r: 0.05,
-                            g: 0.07,
-                            b: 0.10,
-                            a: 0.88,
-                        },
-                    );
-                    d2d.draw_rounded_rect(
-                        b_rect,
-                        6.0,
-                        D2D1_COLOR_F {
-                            r: 1.0,
-                            g: 1.0,
-                            b: 1.0,
-                            a: 0.20,
-                        },
-                        1.0,
-                    );
-                    let ic_rect = D2D_RECT_F {
-                        left: b_rect.left + b_pad,
-                        top: b_rect.top + b_pad,
-                        right: b_rect.right - b_pad,
-                        bottom: b_rect.bottom - b_pad,
-                    };
-                    d2d.draw_bitmap(icon_bmp, ic_rect, 1.0);
-                }
+                        right: card_rect.left + 8.0 + b,
+                        bottom: card_rect.top + 8.0 + b,
+                    },
+                );
             }
 
             x += w + self.gap;
@@ -387,7 +201,8 @@ impl PickerLayout for DockLayout {
 
     fn hit_test(&self, px: f32, py: f32, windows: &[WindowInfo], sw: f32, sh: f32) -> Option<usize> {
         let count = windows.len();
-        let base_y = sh - 36.0;
+        // Must match the baseline used in render().
+        let base_y = sh - 28.0;
         let mut widths = Vec::with_capacity(count);
         let mut total_w = 0.0;
         for i in 0..count {

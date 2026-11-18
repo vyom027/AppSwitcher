@@ -1,7 +1,7 @@
 use crate::config::Settings;
 use crate::event::{AppEvent, WM_APP_EVENT};
 use crate::layouts::draw_liquid_glass;
-use crate::render::d2d::D2DContext;
+use crate::render::d2d::{glyph, Align, D2DContext, Font};
 use crossbeam_channel::Sender;
 use std::mem::size_of;
 use std::os::windows::process::CommandExt;
@@ -12,19 +12,24 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateRoundRectRgn, EndPaint, RedrawWindow, SetWindowRgn, PAINTSTRUCT,
+    BeginPaint, EndPaint, RedrawWindow, PAINTSTRUCT,
     RDW_INVALIDATE, RDW_UPDATENOW,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, ReleaseCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowLongPtrW, LoadIconW, PostMessageW,
     RegisterClassExW, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA,
     HTCAPTION, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW, WM_CLOSE, WM_ERASEBKGND,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCLBUTTONDOWN, WM_PAINT, WM_SYSKEYDOWN, WNDCLASSEXW,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_PAINT,
+    WM_SYSKEYDOWN, WNDCLASSEXW,
     WS_EX_APPWINDOW, WS_POPUP,
 };
+/// Sent after TrackMouseEvent(TME_LEAVE) when the cursor leaves the window.
+const WM_MOUSELEAVE: u32 = 0x02A3;
 const ANIMATIONS: &[(&str, &str)] = &[
     ("slide", "Slide"),
     ("duo_fold", "Duo Fold"),
@@ -97,6 +102,8 @@ pub struct SettingsDialog {
     autostart: bool,
     touchpad_warning: bool,
     open_combo: Option<usize>,
+    /// Cursor position in client coordinates while over the window (hover states).
+    mouse: Option<(f32, f32)>,
 }
 unsafe impl Send for SettingsDialog {}
 unsafe impl Sync for SettingsDialog {}
@@ -355,6 +362,27 @@ unsafe extern "system" fn settings_wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: 
                 let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW);
                 return LRESULT(0);
             }
+            WM_MOUSEMOVE => {
+                let x = (l.0 as usize & 0xffff) as i16 as f32;
+                let y = ((l.0 as usize >> 16) & 0xffff) as i16 as f32;
+                if dlg.mouse.is_none() {
+                    let mut tme = TRACKMOUSEEVENT {
+                        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    let _ = TrackMouseEvent(&mut tme);
+                }
+                dlg.mouse = Some((x, y));
+                dlg.render();
+                return LRESULT(0);
+            }
+            WM_MOUSELEAVE => {
+                dlg.mouse = None;
+                dlg.render();
+                return LRESULT(0);
+            }
             WM_LBUTTONDOWN => {
                 let x = (l.0 as usize & 0xffff) as i16 as f32;
                 let y = ((l.0 as usize >> 16) & 0xffff) as i16 as f32;
@@ -433,8 +461,6 @@ impl SettingsDialog {
                 instance,
                 None,
             )?;
-            let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 48, 48);
-            let _ = SetWindowRgn(hwnd, region, true);
             let dark = 1i32;
             let _ = DwmSetWindowAttribute(
                 hwnd,
@@ -469,6 +495,7 @@ impl SettingsDialog {
                 autostart: autostart_enabled(),
                 touchpad_warning: three_finger_enabled(),
                 open_combo: None,
+                mouse: None,
             });
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, dlg.as_mut() as *mut _ as isize);
             Ok(dlg)
@@ -1670,137 +1697,287 @@ impl SettingsDialog {
             }
         }
     }
+    fn hovered(&self, r: D2D_RECT_F) -> bool {
+        self.mouse.is_some_and(|(x, y)| inside(r, x, y))
+    }
+
+    /// Raised surface for a settings section.
+    fn card(&self, r: D2D_RECT_F) {
+        self.d2d.fill_rounded_rect(
+            D2D_RECT_F {
+                top: r.top + 2.0,
+                bottom: r.bottom + 2.0,
+                ..r
+            },
+            9.0,
+            rgba(0.0, 0.0, 0.0, 0.22),
+        );
+        self.d2d.fill_rounded_rect(r, 8.0, theme::CARD);
+        self.d2d.draw_rounded_rect(r, 8.0, theme::CARD_STROKE, 1.0);
+    }
+
+    /// Fluent-style control surface (combo box, text field, button).
+    fn control(&self, r: D2D_RECT_F, active: bool, ac: D2D1_COLOR_F) {
+        let fill = if active || self.hovered(r) {
+            theme::CONTROL_HOVER
+        } else {
+            theme::CONTROL
+        };
+        self.d2d.fill_rounded_rect(r, 6.0, fill);
+        self.d2d.draw_rounded_rect(
+            r,
+            6.0,
+            if active { ac } else { theme::CONTROL_STROKE },
+            1.0,
+        );
+        // Fluent inputs carry a slightly brighter bottom edge.
+        self.d2d.fill_rect(
+            D2D_RECT_F {
+                left: r.left + 6.0,
+                top: r.bottom - 1.0,
+                right: r.right - 6.0,
+                bottom: r.bottom,
+            },
+            if active { ac } else { rgba(1.0, 1.0, 1.0, 0.07) },
+        );
+    }
+
+    fn section_header(&self, glyph: char, title: &str, r: D2D_RECT_F) {
+        self.d2d.icon(
+            glyph,
+            D2D_RECT_F {
+                right: r.left + 18.0,
+                ..r
+            },
+            theme::TEXT2,
+            15.0,
+        );
+        self.d2d.text(
+            title,
+            D2D_RECT_F {
+                left: r.left + 28.0,
+                ..r
+            },
+            theme::TEXT1,
+            14.0,
+            600,
+            Font::Text,
+            Align::Leading,
+        );
+    }
+
+    /// Windows 11 toggle switch, centred inside the existing hit rect.
+    fn toggle(&self, hit: D2D_RECT_F, on: bool, ac: D2D1_COLOR_F) {
+        let cx = (hit.left + hit.right) * 0.5;
+        let cy = (hit.top + hit.bottom) * 0.5;
+        let track = D2D_RECT_F {
+            left: cx - 20.0,
+            top: cy - 10.0,
+            right: cx + 20.0,
+            bottom: cy + 10.0,
+        };
+        let hover = self.hovered(hit);
+        if on {
+            self.d2d.fill_rounded_rect(track, 10.0, ac);
+            self.d2d
+                .fill_circle(track.right - 10.0, cy, if hover { 7.0 } else { 6.0 }, on_accent(ac));
+        } else {
+            self.d2d.fill_rounded_rect(
+                track,
+                10.0,
+                if hover { rgba(1.0, 1.0, 1.0, 0.06) } else { rgba(0.0, 0.0, 0.0, 0.10) },
+            );
+            self.d2d
+                .draw_rounded_rect(track, 10.0, rgba(1.0, 1.0, 1.0, 0.55), 1.0);
+            self.d2d.fill_circle(
+                track.left + 10.0,
+                cy,
+                if hover { 6.0 } else { 5.0 },
+                rgba(1.0, 1.0, 1.0, 0.78),
+            );
+        }
+    }
+
+    fn button(&self, r: D2D_RECT_F, label: &str, glyph: Option<char>, ac: D2D1_COLOR_F) {
+        self.control(r, false, ac);
+        let size = 12.5;
+        let text_w = self.d2d.measure(label, size, 400, Font::Text);
+        let icon_w = if glyph.is_some() { 22.0 } else { 0.0 };
+        let left = (r.left + r.right - text_w - icon_w) * 0.5;
+        if let Some(g) = glyph {
+            self.d2d.icon(
+                g,
+                D2D_RECT_F {
+                    left,
+                    right: left + 14.0,
+                    ..r
+                },
+                theme::TEXT2,
+                12.0,
+            );
+        }
+        self.d2d.text(
+            label,
+            D2D_RECT_F {
+                left: left + icon_w,
+                right: r.right,
+                ..r
+            },
+            theme::TEXT1,
+            size,
+            400,
+            Font::Text,
+            Align::Leading,
+        );
+    }
+
+    /// Draw a shortcut such as "Ctrl + Tab" as keycaps centred in `r`.
+    fn keycaps(&self, chord: &str, r: D2D_RECT_F) {
+        let keys: Vec<&str> = chord.split(" + ").filter(|k| !k.is_empty()).collect();
+        if keys.is_empty() {
+            self.d2d.text(
+                "Not set",
+                r,
+                theme::TEXT3,
+                12.5,
+                400,
+                Font::Text,
+                Align::Center,
+            );
+            return;
+        }
+        let size = 12.0;
+        let pad = 9.0;
+        let plus = 18.0;
+        let widths: Vec<f32> = keys
+            .iter()
+            .map(|k| self.d2d.measure(k, size, 600, Font::Text) + pad * 2.0)
+            .collect();
+        let total: f32 = widths.iter().sum::<f32>() + plus * (keys.len() - 1) as f32;
+        let mut x = (r.left + r.right - total) * 0.5;
+        let cy = (r.top + r.bottom) * 0.5;
+        for (i, (key, w)) in keys.iter().zip(&widths).enumerate() {
+            if i > 0 {
+                self.d2d.text(
+                    "+",
+                    D2D_RECT_F {
+                        left: x,
+                        top: r.top,
+                        right: x + plus,
+                        bottom: r.bottom,
+                    },
+                    theme::TEXT3,
+                    12.0,
+                    400,
+                    Font::Text,
+                    Align::Center,
+                );
+                x += plus;
+            }
+            let cap = D2D_RECT_F {
+                left: x,
+                top: cy - 12.0,
+                right: x + w,
+                bottom: cy + 12.0,
+            };
+            self.d2d.fill_rounded_rect(cap, 5.0, rgba(1.0, 1.0, 1.0, 0.08));
+            self.d2d.draw_rounded_rect(cap, 5.0, rgba(1.0, 1.0, 1.0, 0.10), 1.0);
+            self.d2d.fill_rect(
+                D2D_RECT_F {
+                    left: cap.left + 4.0,
+                    top: cap.bottom - 1.5,
+                    right: cap.right - 4.0,
+                    bottom: cap.bottom,
+                },
+                rgba(0.0, 0.0, 0.0, 0.35),
+            );
+            self.d2d
+                .text(key, cap, theme::TEXT1, size, 600, Font::Text, Align::Center);
+            x += w;
+        }
+    }
+
     pub fn render(&self) {
         self.d2d.begin_draw();
         let w = self.width as f32;
         let h = self.height as f32;
         let c = self.settings.read();
-        let ac = D2D1_COLOR_F {
-            r: c.accent[0] as f32 / 255.0,
-            g: c.accent[1] as f32 / 255.0,
-            b: c.accent[2] as f32 / 255.0,
-            a: 1.0,
-        };
-        let white = D2D1_COLOR_F {
-            r: 0.94,
-            g: 0.96,
-            b: 1.0,
-            a: 1.0,
-        };
-        let muted = D2D1_COLOR_F {
-            r: 0.60,
-            g: 0.65,
-            b: 0.74,
-            a: 1.0,
-        };
-        let edge = D2D1_COLOR_F {
-            r: 1.0,
-            g: 1.0,
-            b: 1.0,
-            a: 0.07,
-        };
-        let dark = D2D1_COLOR_F {
-            r: 0.105,
-            g: 0.12,
-            b: 0.155,
-            a: 0.97,
-        };
-        self.d2d.clear(0.045, 0.052, 0.073, 1.0);
-        let body = D2D_RECT_F {
-            left: 2.0,
-            top: 2.0,
-            right: w - 2.0,
-            bottom: h - 2.0,
-        };
-        self.d2d.fill_rounded_rect(
-            body,
-            26.0,
-            D2D1_COLOR_F {
-                r: 0.075,
-                g: 0.083,
-                b: 0.11,
-                a: 1.0,
-            },
+        let ac = rgba(
+            c.accent[0] as f32 / 255.0,
+            c.accent[1] as f32 / 255.0,
+            c.accent[2] as f32 / 255.0,
+            1.0,
         );
-        self.d2d.draw_glow(
-            D2D_RECT_F {
-                left: 0.0,
-                top: 0.0,
-                right: 320.0,
-                bottom: 110.0,
-            },
-            70.0,
-            D2D1_COLOR_F { a: 0.13, ..ac },
-            7,
+
+        // ── Window background & header ───────────────────────────────────
+        self.d2d.clear(
+            theme::BACKGROUND.r,
+            theme::BACKGROUND.g,
+            theme::BACKGROUND.b,
+            1.0,
         );
-        self.d2d.draw_rounded_rect(body, 26.0, edge, 1.0);
-        let icon = D2D_RECT_F {
+        let tile = D2D_RECT_F {
             left: 30.0,
             top: 27.0,
             right: 64.0,
             bottom: 61.0,
         };
+        self.d2d.fill_rounded_rect(tile, 8.0, D2D1_COLOR_F { a: 0.16, ..ac });
+        self.d2d
+            .draw_rounded_rect(tile, 8.0, D2D1_COLOR_F { a: 0.28, ..ac }, 1.0);
         self.d2d.fill_rounded_rect(
-            icon,
-            10.0,
-            D2D1_COLOR_F {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 0.055,
+            D2D_RECT_F {
+                left: 41.0,
+                top: 41.0,
+                right: 57.0,
+                bottom: 53.0,
             },
+            3.0,
+            rgba(1.0, 1.0, 1.0, 0.38),
         );
         self.d2d.fill_rounded_rect(
             D2D_RECT_F {
                 left: 37.0,
                 top: 35.0,
-                right: 52.0,
-                bottom: 46.0,
+                right: 53.0,
+                bottom: 47.0,
             },
             3.0,
             ac,
         );
-        self.d2d.fill_rounded_rect(
+        let title = D2D_RECT_F {
+            left: 76.0,
+            top: 27.0,
+            right: 340.0,
+            bottom: 61.0,
+        };
+        self.d2d
+            .text("AppSwitcher", title, theme::TEXT1, 20.0, 600, Font::Display, Align::Leading);
+        let title_w = self.d2d.measure("AppSwitcher", 20.0, 600, Font::Display);
+        self.d2d.text(
+            "Settings",
             D2D_RECT_F {
-                left: 44.0,
-                top: 43.0,
-                right: 59.0,
-                bottom: 54.0,
+                left: title.left + title_w + 10.0,
+                ..title
             },
-            3.0,
-            D2D1_COLOR_F {
-                r: 0.58,
-                g: 0.63,
-                b: 0.72,
-                a: 1.0,
-            },
+            theme::TEXT2,
+            20.0,
+            400,
+            Font::Display,
+            Align::Leading,
         );
-        self.d2d.draw_text(
-            "AppSwitcher",
-            D2D_RECT_F {
-                left: 76.0,
-                top: 27.0,
-                right: 340.0,
-                bottom: 62.0,
-            },
-            white,
-            22.0,
-            true,
-            false,
-        );
-        self.d2d.draw_text(
-            "x",
-            D2D_RECT_F {
-                left: w - 58.0,
-                top: 27.0,
-                right: w - 26.0,
-                bottom: 59.0,
-            },
-            muted,
-            14.0,
-            false,
-            true,
-        );
+        let close = D2D_RECT_F {
+            left: w - 58.0,
+            top: 27.0,
+            right: w - 26.0,
+            bottom: 59.0,
+        };
+        if self.hovered(close) {
+            self.d2d.fill_rounded_rect(close, 6.0, rgba(1.0, 1.0, 1.0, 0.07));
+        }
+        self.d2d.icon(glyph::CLOSE, close, theme::TEXT2, 11.0);
+
+        // ── Touchpad warning (Fluent InfoBar) ────────────────────────────
         let warn = self.touchpad_warning && !c.warn_dismissed;
         if warn {
             let r = D2D_RECT_F {
@@ -1809,145 +1986,114 @@ impl SettingsDialog {
                 right: w - 30.0,
                 bottom: 138.0,
             };
-            self.d2d.fill_rounded_rect(
-                r,
-                16.0,
-                D2D1_COLOR_F {
-                    r: 0.45,
-                    g: 0.32,
-                    b: 0.12,
-                    a: 0.24,
-                },
-            );
-            self.d2d.draw_rounded_rect(
-                r,
-                16.0,
-                D2D1_COLOR_F {
-                    r: 1.0,
-                    g: 0.75,
-                    b: 0.2,
-                    a: 0.27,
-                },
-                1.0,
-            );
-            self.d2d.draw_text(
-                "!",
+            self.d2d.fill_rounded_rect(r, 8.0, rgba(0.26, 0.21, 0.11, 1.0));
+            self.d2d.draw_rounded_rect(r, 8.0, rgba(1.0, 0.85, 0.45, 0.16), 1.0);
+            let amber = rgba(0.99, 0.82, 0.38, 1.0);
+            self.d2d.icon(
+                glyph::WARNING,
                 D2D_RECT_F {
                     left: r.left + 16.0,
-                    top: r.top + 14.0,
+                    top: r.top,
                     right: r.left + 40.0,
-                    bottom: r.bottom - 10.0,
+                    bottom: r.bottom,
                 },
-                D2D1_COLOR_F {
-                    r: 1.0,
-                    g: 0.82,
-                    b: 0.48,
-                    a: 1.0,
-                },
-                17.0,
-                true,
-                true,
+                amber,
+                16.0,
             );
-            self.d2d.draw_text(
-                "Windows 3-finger swipes are still on",
+            self.d2d.text(
+                "Windows three-finger swipes are still on",
                 D2D_RECT_F {
                     left: r.left + 52.0,
-                    top: r.top + 8.0,
+                    top: r.top + 9.0,
                     right: r.right - 330.0,
-                    bottom: r.top + 30.0,
+                    bottom: r.top + 31.0,
                 },
-                D2D1_COLOR_F {
-                    r: 1.0,
-                    g: 0.82,
-                    b: 0.48,
-                    a: 1.0,
+                theme::TEXT1,
+                13.0,
+                600,
+                Font::Text,
+                Align::Leading,
+            );
+            self.d2d.text(
+                "Set Touchpad › Three-finger gestures › Swipes to Nothing so AppSwitcher receives them.",
+                D2D_RECT_F {
+                    left: r.left + 52.0,
+                    top: r.top + 30.0,
+                    right: r.right - 330.0,
+                    bottom: r.bottom - 8.0,
                 },
+                theme::TEXT2,
                 12.0,
-                true,
-                false,
+                400,
+                Font::Text,
+                Align::Leading,
             );
-            self.d2d.draw_text(
-                "Set Touchpad > Three-finger gestures > Swipes to Nothing.",
-                D2D_RECT_F {
-                    left: r.left + 52.0,
-                    top: r.top + 31.0,
-                    right: r.right - 330.0,
-                    bottom: r.bottom - 7.0,
-                },
-                muted,
-                10.0,
-                false,
-                false,
-            );
-            self.d2d.draw_text(
-                "Open Touchpad",
+            self.button(
                 D2D_RECT_F {
                     left: r.right - 290.0,
                     top: r.top + 12.0,
                     right: r.right - 154.0,
                     bottom: r.bottom - 12.0,
                 },
-                white,
-                10.0,
-                true,
-                true,
+                "Open Touchpad",
+                None,
+                ac,
             );
-            self.d2d.draw_text(
-                "Dismiss",
-                D2D_RECT_F {
-                    left: r.right - 142.0,
-                    top: r.top + 12.0,
-                    right: r.right - 18.0,
-                    bottom: r.bottom - 12.0,
-                },
-                muted,
-                10.0,
-                false,
-                true,
-            );
+            let dismiss = D2D_RECT_F {
+                left: r.right - 142.0,
+                top: r.top + 12.0,
+                right: r.right - 18.0,
+                bottom: r.bottom - 12.0,
+            };
+            if self.hovered(dismiss) {
+                self.d2d.fill_rounded_rect(dismiss, 6.0, rgba(1.0, 1.0, 1.0, 0.06));
+            }
+            self.d2d
+                .text("Dismiss", dismiss, theme::TEXT2, 12.5, 400, Font::Text, Align::Center);
         }
+
         let p = dashboard_panels(self.width, self.height, warn);
         for r in p {
-            draw_liquid_glass(&self.d2d, r, 20.0, ac, false);
+            self.card(r);
         }
+
+        // ── Look ─────────────────────────────────────────────────────────
         let a = p[0];
-        self.d2d.draw_text(
-            "L O O K",
+        self.section_header(
+            glyph::PERSONALIZE,
+            "Look",
             D2D_RECT_F {
                 left: a.left + 20.0,
-                top: a.top + 17.0,
+                top: a.top + 14.0,
                 right: a.right - 18.0,
-                bottom: a.top + 38.0,
+                bottom: a.top + 40.0,
             },
-            muted,
-            10.0,
-            true,
-            false,
         );
         for (t, y) in [
             ("Switch animation", a.top + 48.0),
             ("Picker layout", a.top + 126.0),
             ("Switch shortcut", a.top + 204.0),
         ] {
-            self.d2d.draw_text(
+            self.d2d.text(
                 t,
                 D2D_RECT_F {
                     left: a.left + 20.0,
                     top: y,
                     right: a.right - 20.0,
-                    bottom: y + 19.0,
+                    bottom: y + 20.0,
                 },
-                muted,
-                11.0,
-                false,
-                false,
+                theme::TEXT2,
+                12.5,
+                400,
+                Font::Text,
+                Align::Leading,
             );
         }
         let anim = ANIMATIONS
             .iter()
             .find(|(k, _)| *k == c.animation)
             .map(|(_, v)| *v)
-            .unwrap_or("slide");
+            .unwrap_or("Slide");
         let layout = LAYOUTS
             .iter()
             .find(|(k, _)| *k == c.layout)
@@ -1955,399 +2101,404 @@ impl SettingsDialog {
             .unwrap_or("Dock");
         for (i, v) in [anim, layout].iter().enumerate() {
             let r = look_combo(a, i);
-            self.d2d.fill_rounded_rect(r, 13.0, dark);
-            self.d2d.draw_rounded_rect(r, 13.0, edge, 1.0);
-            self.d2d.draw_text(v, r, white, 12.0, false, false);
-            self.d2d.draw_text(
-                "v",
+            let open = self.open_combo == Some(i);
+            self.control(r, open, ac);
+            self.d2d.text(
+                v,
                 D2D_RECT_F {
-                    left: r.right - 34.0,
-                    top: r.top + 5.0,
+                    left: r.left + 12.0,
+                    right: r.right - 40.0,
+                    ..r
+                },
+                theme::TEXT1,
+                13.0,
+                400,
+                Font::Text,
+                Align::Leading,
+            );
+            self.d2d.icon(
+                if open { glyph::CHEVRON_UP } else { glyph::CHEVRON_DOWN },
+                D2D_RECT_F {
+                    left: r.right - 36.0,
                     right: r.right - 12.0,
-                    bottom: r.bottom - 5.0,
+                    ..r
                 },
-                muted,
+                theme::TEXT2,
                 10.0,
-                false,
-                true,
             );
         }
-        for (i, v) in [c.hotkey_mod.as_str(), key_name(c.hotkey_key)]
-            .iter()
-            .enumerate()
-        {
+        let mod_label = if c.hotkey_mod.eq_ignore_ascii_case("ctrl") {
+            "Ctrl"
+        } else {
+            "Alt"
+        };
+        for (i, v) in [mod_label, key_name(c.hotkey_key)].iter().enumerate() {
             let r = hotkey_combo(a, i);
-            self.d2d.fill_rounded_rect(r, 13.0, dark);
-            self.d2d.draw_rounded_rect(r, 13.0, edge, 1.0);
-            self.d2d.draw_text(v, r, white, 11.0, false, true);
-            self.d2d.draw_text(
-                "v",
+            let open = self.open_combo == Some(2 + i);
+            self.control(r, open, ac);
+            self.d2d.text(
+                v,
                 D2D_RECT_F {
-                    left: r.right - 28.0,
-                    top: r.top + 5.0,
-                    right: r.right - 10.0,
-                    bottom: r.bottom - 5.0,
+                    left: r.left + 12.0,
+                    right: r.right - 34.0,
+                    ..r
                 },
-                muted,
+                theme::TEXT1,
+                13.0,
+                600,
+                Font::Text,
+                Align::Leading,
+            );
+            self.d2d.icon(
+                if open { glyph::CHEVRON_UP } else { glyph::CHEVRON_DOWN },
+                D2D_RECT_F {
+                    left: r.right - 32.0,
+                    right: r.right - 10.0,
+                    ..r
+                },
+                theme::TEXT2,
                 10.0,
-                false,
-                true,
             );
         }
-        self.d2d.draw_text(
+        self.d2d.text(
             "+",
             D2D_RECT_F {
                 left: hotkey_combo(a, 0).right,
-                top: a.top + 240.0,
+                top: hotkey_combo(a, 0).top,
                 right: hotkey_combo(a, 1).left,
-                bottom: a.top + 266.0,
+                bottom: hotkey_combo(a, 0).bottom,
             },
-            muted,
-            12.0,
-            false,
-            true,
+            theme::TEXT3,
+            13.0,
+            400,
+            Font::Text,
+            Align::Center,
         );
-        self.d2d.draw_text(
-            "Pinch shortcut (3-finger)",
+        self.d2d.text(
+            "Pinch shortcut (three fingers)",
             D2D_RECT_F {
                 left: a.left + 20.0,
-                top: a.top + 286.0,
+                top: a.top + 285.0,
                 right: a.right - 90.0,
-                bottom: a.top + 313.0,
+                bottom: a.top + 315.0,
             },
-            muted,
-            11.0,
-            false,
-            false,
+            theme::TEXT2,
+            12.5,
+            400,
+            Font::Text,
+            Align::Leading,
         );
-        let ps = D2D_RECT_F {
-            left: a.right - 70.0,
-            top: a.top + 285.0,
-            right: a.right - 20.0,
-            bottom: a.top + 315.0,
-        };
-        self.d2d.fill_rounded_rect(
-            ps,
-            15.0,
-            if c.pinch_enabled {
-                ac
-            } else {
-                D2D1_COLOR_F {
-                    r: 0.22,
-                    g: 0.24,
-                    b: 0.29,
-                    a: 1.0,
-                }
-            },
-        );
-        let k = if c.pinch_enabled {
-            ps.right - 15.0
-        } else {
-            ps.left + 15.0
-        };
-        self.d2d.fill_rounded_rect(
+        self.toggle(
             D2D_RECT_F {
-                left: k - 12.0,
-                top: ps.top + 3.0,
-                right: k + 12.0,
-                bottom: ps.bottom - 3.0,
+                left: a.right - 70.0,
+                top: a.top + 285.0,
+                right: a.right - 20.0,
+                bottom: a.top + 315.0,
             },
-            12.0,
-            white,
+            c.pinch_enabled,
+            ac,
         );
         let cap = pinch_capture_rect(a);
-        self.d2d.fill_rounded_rect(cap, 13.0, dark);
-        self.d2d
-            .draw_rounded_rect(cap, 13.0, if self.capture_pinch { ac } else { edge }, 1.0);
-        let chord = shortcut_text(&c.pinch_mods, c.pinch_vk);
-        self.d2d.draw_text(
-            if self.capture_pinch {
-                "Press keys"
-            } else {
-                &chord
-            },
-            cap,
-            if self.capture_pinch { ac } else { white },
-            11.0,
-            false,
-            true,
-        );
-        let clear = pinch_clear_rect(a);
-        self.d2d.fill_rounded_rect(clear, 13.0, dark);
-        self.d2d.draw_rounded_rect(clear, 13.0, edge, 1.0);
-        self.d2d.draw_text("Clear", clear, white, 10.0, false, true);
-        for i in 0..2 {
-            let r = preview_button(a, i);
-            self.d2d.fill_rounded_rect(r, 13.0, dark);
-            self.d2d.draw_rounded_rect(r, 13.0, edge, 1.0);
-            self.d2d.draw_text(
-                if i == 0 {
-                    "Preview layout"
-                } else {
-                    "Preview anim"
-                },
-                r,
-                white,
-                10.0,
-                false,
-                true,
+        self.control(cap, self.capture_pinch, ac);
+        if self.capture_pinch {
+            self.d2d.text(
+                "Press a shortcut…  (Esc to cancel)",
+                cap,
+                ac,
+                12.5,
+                400,
+                Font::Text,
+                Align::Center,
             );
+        } else {
+            self.d2d.icon(
+                glyph::KEYBOARD,
+                D2D_RECT_F {
+                    left: cap.left + 12.0,
+                    right: cap.left + 32.0,
+                    ..cap
+                },
+                theme::TEXT3,
+                13.0,
+            );
+            self.keycaps(&shortcut_text(&c.pinch_mods, c.pinch_vk), cap);
         }
+        self.button(pinch_clear_rect(a), "Clear", None, ac);
+        self.button(preview_button(a, 0), "Preview layout", Some(glyph::VIEW_ALL), ac);
+        self.button(preview_button(a, 1), "Preview animation", Some(glyph::PLAY), ac);
+
+        // ── Feel ─────────────────────────────────────────────────────────
         let m = p[1];
-        self.d2d.draw_text(
-            "F E E L",
+        self.section_header(
+            glyph::SPEED,
+            "Feel",
             D2D_RECT_F {
                 left: m.left + 20.0,
-                top: m.top + 17.0,
+                top: m.top + 14.0,
                 right: m.right - 20.0,
-                bottom: m.top + 38.0,
+                bottom: m.top + 40.0,
             },
-            muted,
-            10.0,
-            true,
-            false,
         );
-        let labels = ["Animation speed", "Dock magnify", "Sensitivity"];
+        let labels = ["Animation duration", "Dock magnification", "Swipe sensitivity"];
         let vals = [
             format!("{} ms", (c.duration * 1000.0).round() as i32),
-            format!("{:.2}x", c.dock_mag),
-            format!("{}", c.sensitivity),
+            format!("{:.2}×", c.dock_mag),
+            format!("{} px", c.sensitivity),
         ];
         for i in 0..3 {
             let y = m.top + 47.0 + i as f32 * 82.0;
-            self.d2d.draw_text(
+            let r = slider_track(m, i);
+            self.d2d.text(
                 labels[i],
                 D2D_RECT_F {
                     left: m.left + 20.0,
                     top: y,
-                    right: m.right - 95.0,
+                    right: m.right - 120.0,
                     bottom: y + 20.0,
                 },
-                muted,
-                11.0,
-                false,
-                false,
+                theme::TEXT1,
+                13.0,
+                400,
+                Font::Text,
+                Align::Leading,
             );
-            self.d2d.draw_text(
+            self.d2d.text(
                 &vals[i],
                 D2D_RECT_F {
-                    left: m.right - 96.0,
+                    left: m.right - 140.0,
                     top: y,
-                    right: m.right - 20.0,
+                    right: r.right,
                     bottom: y + 20.0,
                 },
-                ac,
-                11.0,
-                true,
-                true,
-            );
-            let r = slider_track(m, i);
-            self.d2d.fill_rounded_rect(
-                r,
-                3.0,
-                D2D1_COLOR_F {
-                    r: 1.0,
-                    g: 1.0,
-                    b: 1.0,
-                    a: 0.12,
-                },
+                theme::TEXT2,
+                12.5,
+                400,
+                Font::Text,
+                Align::Trailing,
             );
             let t = match i {
                 0 => ((c.duration * 1000.0 - 80.0) / 520.0).clamp(0.0, 1.0) as f32,
                 1 => ((c.dock_mag - 1.2) / 1.4).clamp(0.0, 1.0) as f32,
                 _ => ((c.sensitivity as f64 - 120.0) / 280.0).clamp(0.0, 1.0) as f32,
             };
-            let cx = r.left + (r.right - r.left) * t;
+            let cy = (r.top + r.bottom) * 0.5;
+            let track = D2D_RECT_F {
+                left: r.left,
+                top: cy - 2.0,
+                right: r.right,
+                bottom: cy + 2.0,
+            };
+            let cx = track.left + (track.right - track.left) * t;
+            self.d2d.fill_rounded_rect(track, 2.0, rgba(1.0, 1.0, 1.0, 0.16));
             self.d2d
-                .fill_rounded_rect(D2D_RECT_F { right: cx, ..r }, 3.0, ac);
-            self.d2d.fill_rounded_rect(
-                D2D_RECT_F {
-                    left: cx - 8.0,
-                    top: r.top - 7.0,
-                    right: cx + 8.0,
-                    bottom: r.bottom + 7.0,
-                },
-                8.0,
-                white,
-            );
+                .fill_rounded_rect(D2D_RECT_F { right: cx, ..track }, 2.0, ac);
+            // Win11 thumb: neutral disc with an accent core that grows on hover.
+            let hover = self.hovered(D2D_RECT_F {
+                top: r.top - 20.0,
+                bottom: r.bottom + 20.0,
+                ..r
+            });
+            self.d2d.fill_circle(cx, cy, 10.0, theme::THUMB);
             self.d2d.draw_rounded_rect(
                 D2D_RECT_F {
-                    left: cx - 8.0,
-                    top: r.top - 7.0,
-                    right: cx + 8.0,
-                    bottom: r.bottom + 7.0,
+                    left: cx - 10.0,
+                    top: cy - 10.0,
+                    right: cx + 10.0,
+                    bottom: cy + 10.0,
                 },
-                8.0,
-                ac,
-                1.3,
+                10.0,
+                rgba(1.0, 1.0, 1.0, 0.10),
+                1.0,
             );
+            self.d2d.fill_circle(cx, cy, if hover { 7.0 } else { 5.5 }, ac);
         }
-        self.d2d.draw_text(
-            "A C C E N T",
+        self.d2d.text(
+            "Accent",
             D2D_RECT_F {
                 left: m.left + 20.0,
                 top: m.bottom - 43.0,
                 right: m.left + 94.0,
-                bottom: m.bottom - 18.0,
+                bottom: m.bottom - 19.0,
             },
-            muted,
-            9.0,
-            true,
-            false,
+            theme::TEXT2,
+            12.5,
+            400,
+            Font::Text,
+            Align::Leading,
         );
         for (i, (_, rgb)) in ACCENTS.iter().enumerate() {
             let r = accent_swatch(m, i);
-            let z = D2D1_COLOR_F {
-                r: rgb[0] as f32 / 255.0,
-                g: rgb[1] as f32 / 255.0,
-                b: rgb[2] as f32 / 255.0,
-                a: 1.0,
-            };
-            self.d2d.fill_rounded_rect(r, 12.0, z);
-            if c.accent == *rgb {
+            let z = rgba(
+                rgb[0] as f32 / 255.0,
+                rgb[1] as f32 / 255.0,
+                rgb[2] as f32 / 255.0,
+                1.0,
+            );
+            let cx = (r.left + r.right) * 0.5;
+            let cy = (r.top + r.bottom) * 0.5;
+            let selected = c.accent == *rgb;
+            if selected {
                 self.d2d.draw_rounded_rect(
                     D2D_RECT_F {
-                        left: r.left - 2.0,
-                        top: r.top - 2.0,
-                        right: r.right + 2.0,
-                        bottom: r.bottom + 2.0,
+                        left: cx - 15.0,
+                        top: cy - 15.0,
+                        right: cx + 15.0,
+                        bottom: cy + 15.0,
                     },
-                    14.0,
-                    white,
-                    2.0,
+                    15.0,
+                    theme::TEXT1,
+                    1.5,
                 );
             }
+            let radius = if self.hovered(r) && !selected { 12.0 } else { 11.0 };
+            self.d2d.fill_circle(cx, cy, radius, z);
+            if selected {
+                self.d2d.icon(glyph::CHECK, r, on_accent(z), 11.0);
+            }
         }
+
+        // ── Hide from switcher ───────────────────────────────────────────
         let q = p[2];
-        self.d2d.draw_text(
-            "H I D E   F R O M   S W I T C H E R",
+        self.section_header(
+            glyph::HIDE,
+            "Hide from switcher",
             D2D_RECT_F {
                 left: q.left + 18.0,
-                top: q.top + 15.0,
-                right: q.right - 92.0,
-                bottom: q.top + 37.0,
+                top: q.top + 12.0,
+                right: q.right - 100.0,
+                bottom: q.top + 38.0,
             },
-            muted,
-            9.0,
-            true,
-            false,
         );
-        self.d2d.draw_text(
-            &format!("{} · live", self.open_titles.len()),
-            D2D_RECT_F {
-                left: q.right - 94.0,
-                top: q.top + 15.0,
-                right: q.right - 44.0,
-                bottom: q.top + 36.0,
-            },
-            muted,
-            9.0,
-            false,
-            true,
-        );
-        let rr = D2D_RECT_F {
-            left: q.right - 39.0,
-            top: q.top + 12.0,
-            right: q.right - 14.0,
-            bottom: q.top + 37.0,
+        let count = format!("{} open", self.open_titles.len());
+        let count_w = self.d2d.measure(&count, 11.5, 400, Font::Text) + 16.0;
+        let pill = D2D_RECT_F {
+            left: q.right - 46.0 - count_w,
+            top: q.top + 15.0,
+            right: q.right - 46.0,
+            bottom: q.top + 35.0,
         };
-        self.d2d.fill_rounded_rect(
-            rr,
-            13.0,
-            D2D1_COLOR_F {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 0.05,
+        self.d2d.fill_rounded_rect(pill, 10.0, rgba(1.0, 1.0, 1.0, 0.06));
+        self.d2d
+            .text(&count, pill, theme::TEXT2, 11.5, 400, Font::Text, Align::Center);
+        let rr = D2D_RECT_F {
+            left: q.right - 40.0,
+            top: q.top + 11.0,
+            right: q.right - 12.0,
+            bottom: q.top + 39.0,
+        };
+        if self.hovered(rr) {
+            self.d2d.fill_rounded_rect(rr, 6.0, rgba(1.0, 1.0, 1.0, 0.07));
+        }
+        self.d2d.icon(glyph::REFRESH, rr, theme::TEXT2, 13.0);
+        self.d2d.fill_rect(
+            D2D_RECT_F {
+                left: q.left + 1.0,
+                top: q.top + 50.0,
+                right: q.right - 1.0,
+                bottom: q.top + 51.0,
             },
+            theme::CARD_STROKE,
         );
-        self.d2d.draw_text("R", rr, muted, 10.0, true, true);
         let start = self.window_page * 8;
         for i in 0..8 {
-            if let Some(t) = self.open_titles.get(start + i) {
-                let r = window_row(q, i);
-                let on = c.blocklist.contains(t);
-                let dot = D2D_RECT_F {
-                    left: r.left + 12.0,
-                    top: r.top + 15.0,
-                    right: r.left + 20.0,
-                    bottom: r.top + 23.0,
-                };
-                self.d2d.fill_rounded_rect(
-                    dot,
-                    4.0,
-                    if on {
-                        ac
-                    } else {
-                        D2D1_COLOR_F { a: 0.2, ..white }
-                    },
-                );
-                let name = if t.chars().count() > 34 {
-                    format!("{}…", t.chars().take(33).collect::<String>())
-                } else {
-                    t.clone()
-                };
-                self.d2d.draw_text(
-                    &name,
-                    D2D_RECT_F {
-                        left: r.left + 31.0,
-                        top: r.top + 6.0,
-                        right: r.right - 68.0,
-                        bottom: r.bottom - 6.0,
-                    },
-                    if on { muted } else { white },
-                    10.5,
-                    false,
-                    false,
-                );
-                let sr = D2D_RECT_F {
+            let Some(t) = self.open_titles.get(start + i) else {
+                break;
+            };
+            let r = window_row(q, i);
+            let hidden = c.blocklist.contains(t);
+            if self.hovered(r) {
+                self.d2d.fill_rounded_rect(r, 6.0, rgba(1.0, 1.0, 1.0, 0.045));
+            }
+            self.d2d.icon(
+                if hidden { glyph::HIDE } else { glyph::VIEW },
+                D2D_RECT_F {
+                    left: r.left + 6.0,
+                    right: r.left + 30.0,
+                    ..r
+                },
+                if hidden { ac } else { theme::TEXT3 },
+                13.0,
+            );
+            self.d2d.text(
+                t,
+                D2D_RECT_F {
+                    left: r.left + 38.0,
+                    right: r.right - 68.0,
+                    ..r
+                },
+                if hidden { theme::TEXT3 } else { theme::TEXT1 },
+                12.5,
+                400,
+                Font::Text,
+                Align::Leading,
+            );
+            self.toggle(
+                D2D_RECT_F {
                     left: r.right - 60.0,
                     top: r.top + 6.0,
                     right: r.right - 8.0,
                     bottom: r.bottom - 6.0,
-                };
-                self.d2d.fill_rounded_rect(
-                    sr,
-                    14.0,
-                    if on {
-                        ac
-                    } else {
-                        D2D1_COLOR_F {
-                            r: 0.21,
-                            g: 0.23,
-                            b: 0.28,
-                            a: 1.0,
-                        }
-                    },
-                );
-                let cx = if on { sr.right - 14.0 } else { sr.left + 14.0 };
-                self.d2d.fill_rounded_rect(
-                    D2D_RECT_F {
-                        left: cx - 11.0,
-                        top: sr.top + 3.0,
-                        right: cx + 11.0,
-                        bottom: sr.bottom - 3.0,
-                    },
-                    11.0,
-                    white,
-                );
-            }
+                },
+                hidden,
+                ac,
+            );
+        }
+        let pages = self.open_titles.len().div_ceil(8);
+        if pages > 1 {
+            let bar = D2D_RECT_F {
+                left: q.left + 12.0,
+                top: q.bottom - 34.0,
+                right: q.right - 12.0,
+                bottom: q.bottom - 8.0,
+            };
+            let prev_on = self.window_page > 0;
+            let next_on = self.window_page + 1 < pages;
+            self.d2d.icon(
+                glyph::CHEVRON_LEFT,
+                D2D_RECT_F {
+                    right: bar.left + 28.0,
+                    ..bar
+                },
+                if prev_on { theme::TEXT1 } else { theme::TEXT3 },
+                11.0,
+            );
+            self.d2d.icon(
+                glyph::CHEVRON_RIGHT,
+                D2D_RECT_F {
+                    left: bar.right - 28.0,
+                    ..bar
+                },
+                if next_on { theme::TEXT1 } else { theme::TEXT3 },
+                11.0,
+            );
+            self.d2d.text(
+                &format!("Page {} of {}", self.window_page + 1, pages),
+                bar,
+                theme::TEXT2,
+                12.0,
+                400,
+                Font::Text,
+                Align::Center,
+            );
         }
         if self.open_titles.is_empty() {
-            self.d2d.draw_text(
-                "No eligible windows found",
+            self.d2d.text(
+                "No windows to show right now",
                 D2D_RECT_F {
                     left: q.left + 25.0,
                     top: q.top + 110.0,
                     right: q.right - 25.0,
                     bottom: q.top + 145.0,
                 },
-                muted,
-                12.0,
-                false,
-                true,
+                theme::TEXT2,
+                13.0,
+                400,
+                Font::Text,
+                Align::Center,
             );
         }
+
+        // ── Footer ───────────────────────────────────────────────────────
         self.d2d.fill_rect(
             D2D_RECT_F {
                 left: 0.0,
@@ -2355,93 +2506,68 @@ impl SettingsDialog {
                 right: w,
                 bottom: h,
             },
-            D2D1_COLOR_F {
-                r: 0.07,
-                g: 0.078,
-                b: 0.102,
-                a: 1.0,
-            },
+            theme::FOOTER,
         );
         self.d2d.fill_rect(
             D2D_RECT_F {
-                left: 30.0,
+                left: 0.0,
                 top: h - 88.0,
-                right: w - 30.0,
+                right: w,
                 bottom: h - 87.0,
             },
-            edge,
+            theme::CARD_STROKE,
         );
-        self.d2d.draw_text(
-            "Replace system switcher",
-            D2D_RECT_F {
-                left: 30.0,
-                top: h - 60.0,
-                right: 258.0,
-                bottom: h - 30.0,
-            },
-            white,
-            10.5,
-            false,
-            false,
-        );
-        self.d2d.draw_text(
-            "Start with Windows",
-            D2D_RECT_F {
-                left: 355.0,
-                top: h - 60.0,
-                right: 535.0,
-                bottom: h - 30.0,
-            },
-            white,
-            10.5,
-            false,
-            false,
-        );
+        for (label, left, right) in [
+            ("Replace the Windows Alt+Tab switcher", 30.0, 258.0),
+            ("Start with Windows", 355.0, 535.0),
+        ] {
+            self.d2d.text(
+                label,
+                D2D_RECT_F {
+                    left,
+                    top: h - 58.0,
+                    right,
+                    bottom: h - 28.0,
+                },
+                theme::TEXT1,
+                13.0,
+                400,
+                Font::Text,
+                Align::Leading,
+            );
+        }
         for (i, on) in [(0, c.alt_tab), (1, self.autostart)] {
             let mut r = footer_switch(i, self.width);
             r.top = h - 58.0;
             r.bottom = h - 28.0;
-            self.d2d.fill_rounded_rect(
-                r,
-                15.0,
-                if on {
-                    ac
-                } else {
-                    D2D1_COLOR_F {
-                        r: 0.22,
-                        g: 0.24,
-                        b: 0.29,
-                        a: 1.0,
-                    }
-                },
-            );
-            let cx = if on { r.right - 15.0 } else { r.left + 15.0 };
-            self.d2d.fill_rounded_rect(
-                D2D_RECT_F {
-                    left: cx - 12.0,
-                    top: r.top + 3.0,
-                    right: cx + 12.0,
-                    bottom: r.bottom - 3.0,
-                },
-                12.0,
-                white,
-            );
+            self.toggle(r, on, ac);
         }
         let save = save_button(self.width, self.height);
-        self.d2d.fill_rounded_rect(save, 13.0, ac);
-        self.d2d.draw_text(
-            "Save",
-            save,
-            D2D1_COLOR_F {
-                r: 0.05,
-                g: 0.06,
-                b: 0.08,
-                a: 1.0,
+        self.d2d.text(
+            &self.status,
+            D2D_RECT_F {
+                left: 640.0,
+                top: save.top,
+                right: save.left - 20.0,
+                bottom: save.bottom,
             },
-            11.0,
-            true,
-            true,
+            theme::TEXT3,
+            12.0,
+            400,
+            Font::Text,
+            Align::Trailing,
         );
+        let save_fill = if self.hovered(save) {
+            rgba(ac.r * 0.9, ac.g * 0.9, ac.b * 0.9, 1.0)
+        } else {
+            ac
+        };
+        self.d2d.fill_rounded_rect(save, 6.0, save_fill);
+        self.d2d.draw_rounded_rect(save, 6.0, rgba(1.0, 1.0, 1.0, 0.12), 1.0);
+        self.d2d
+            .text("Save", save, on_accent(ac), 13.0, 600, Font::Text, Align::Center);
+
+        // ── Open dropdown (Fluent flyout) ────────────────────────────────
         if let Some(open) = self.open_combo {
             let anchor = match open {
                 0 => look_combo(a, 0),
@@ -2452,53 +2578,112 @@ impl SettingsDialog {
             let items: Vec<String> = match open {
                 0 => ANIMATIONS.iter().map(|(_, v)| v.to_string()).collect(),
                 1 => LAYOUTS.iter().map(|(_, v)| v.to_string()).collect(),
-                2 => vec!["alt".into(), "ctrl".into()],
+                2 => vec!["Alt".into(), "Ctrl".into()],
                 _ => HOTKEYS.iter().map(|(v, _)| v.to_string()).collect(),
             };
             let current = match open {
                 0 => anim.to_string(),
                 1 => layout.to_string(),
-                2 => c.hotkey_mod.clone(),
+                2 => mod_label.to_string(),
                 _ => key_name(c.hotkey_key).to_string(),
             };
+            // Same geometry as the click handler: rows are 32px from menu.top.
             let menu = D2D_RECT_F {
                 left: anchor.left,
                 top: anchor.bottom + 4.0,
                 right: anchor.right,
                 bottom: anchor.bottom + 4.0 + items.len() as f32 * 32.0,
             };
+            let outer = D2D_RECT_F {
+                top: menu.top - 4.0,
+                bottom: menu.bottom + 4.0,
+                ..menu
+            };
             self.d2d.fill_rounded_rect(
-                menu,
-                12.0,
-                D2D1_COLOR_F {
-                    r: 0.10,
-                    g: 0.115,
-                    b: 0.15,
-                    a: 1.0,
+                D2D_RECT_F {
+                    left: outer.left - 2.0,
+                    top: outer.top + 2.0,
+                    right: outer.right + 2.0,
+                    bottom: outer.bottom + 8.0,
                 },
+                10.0,
+                rgba(0.0, 0.0, 0.0, 0.35),
             );
-            self.d2d.draw_rounded_rect(menu, 12.0, edge, 1.0);
+            self.d2d.fill_rounded_rect(outer, 8.0, theme::FLYOUT);
+            self.d2d.draw_rounded_rect(outer, 8.0, theme::CONTROL_STROKE, 1.0);
             for (i, item) in items.iter().enumerate() {
-                let row = D2D_RECT_F {
-                    left: menu.left + 5.0,
-                    top: menu.top + 4.0 + i as f32 * 32.0,
-                    right: menu.right - 5.0,
-                    bottom: menu.top + 4.0 + (i + 1) as f32 * 32.0,
+                let slot = D2D_RECT_F {
+                    left: menu.left + 4.0,
+                    top: menu.top + i as f32 * 32.0 + 2.0,
+                    right: menu.right - 4.0,
+                    bottom: menu.top + (i + 1) as f32 * 32.0 - 2.0,
                 };
-                if *item == current {
+                let is_current = *item == current;
+                if is_current || self.hovered(slot) {
                     self.d2d
-                        .fill_rounded_rect(row, 8.0, D2D1_COLOR_F { a: 0.12, ..ac });
+                        .fill_rounded_rect(slot, 5.0, rgba(1.0, 1.0, 1.0, 0.06));
                 }
-                self.d2d.draw_text(
+                if is_current {
+                    let cy = (slot.top + slot.bottom) * 0.5;
+                    self.d2d.fill_rounded_rect(
+                        D2D_RECT_F {
+                            left: slot.left,
+                            top: cy - 8.0,
+                            right: slot.left + 3.0,
+                            bottom: cy + 8.0,
+                        },
+                        1.5,
+                        ac,
+                    );
+                }
+                self.d2d.text(
                     item,
-                    row,
-                    if *item == current { ac } else { white },
-                    10.5,
-                    *item == current,
-                    false,
+                    D2D_RECT_F {
+                        left: slot.left + 12.0,
+                        right: slot.right - 8.0,
+                        ..slot
+                    },
+                    theme::TEXT1,
+                    13.0,
+                    if is_current { 600 } else { 400 },
+                    Font::Text,
+                    Align::Leading,
                 );
             }
         }
         let _ = self.d2d.end_draw();
     }
+}
+
+const fn rgba(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F { r, g, b, a }
+}
+
+/// Text/glyph colour that stays readable on top of an accent fill.
+fn on_accent(c: D2D1_COLOR_F) -> D2D1_COLOR_F {
+    let luminance = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    if luminance > 0.5 {
+        rgba(0.06, 0.07, 0.09, 1.0)
+    } else {
+        rgba(1.0, 1.0, 1.0, 1.0)
+    }
+}
+
+/// Windows 11 dark theme tokens for the settings window.
+mod theme {
+    use super::rgba;
+    use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+
+    pub const BACKGROUND: D2D1_COLOR_F = rgba(0.110, 0.114, 0.125, 1.0);
+    pub const CARD: D2D1_COLOR_F = rgba(0.153, 0.157, 0.169, 1.0);
+    pub const CARD_STROKE: D2D1_COLOR_F = rgba(1.0, 1.0, 1.0, 0.065);
+    pub const CONTROL: D2D1_COLOR_F = rgba(1.0, 1.0, 1.0, 0.055);
+    pub const CONTROL_HOVER: D2D1_COLOR_F = rgba(1.0, 1.0, 1.0, 0.085);
+    pub const CONTROL_STROKE: D2D1_COLOR_F = rgba(1.0, 1.0, 1.0, 0.075);
+    pub const FLYOUT: D2D1_COLOR_F = rgba(0.173, 0.176, 0.188, 1.0);
+    pub const FOOTER: D2D1_COLOR_F = rgba(0.094, 0.098, 0.106, 1.0);
+    pub const THUMB: D2D1_COLOR_F = rgba(0.27, 0.275, 0.29, 1.0);
+    pub const TEXT1: D2D1_COLOR_F = rgba(0.96, 0.965, 0.975, 1.0);
+    pub const TEXT2: D2D1_COLOR_F = rgba(0.73, 0.75, 0.79, 1.0);
+    pub const TEXT3: D2D1_COLOR_F = rgba(0.50, 0.52, 0.56, 1.0);
 }

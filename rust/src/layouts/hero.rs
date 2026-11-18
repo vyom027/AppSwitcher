@@ -1,4 +1,4 @@
-use crate::layouts::PickerLayout;
+use crate::layouts::{style, PickerLayout};
 use crate::render::d2d::D2DContext;
 use crate::window::enumerator::WindowInfo;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
@@ -93,136 +93,37 @@ impl PickerLayout for HeroLayout {
             bottom: prev_top + ph,
         };
 
-        d2d.draw_glow(prev_rect, 20.0, accent, 5);
-
-        d2d.fill_rounded_rect(
-            prev_rect,
-            20.0,
-            D2D1_COLOR_F {
-                r: 0.08,
-                g: 0.10,
-                b: 0.14,
-                a: 0.96,
-            },
-        );
-
-        if self.selected < bitmaps.len() {
-            if let Some(ref bmp) = bitmaps[self.selected] {
-                d2d.fill_rounded_bitmap(bmp, prev_rect, 20.0, 1.0);
-            }
+        style::shadow(d2d, prev_rect, 12.0);
+        d2d.fill_rounded_rect(prev_rect, 12.0, style::THUMB_BG);
+        if let Some(Some(bmp)) = bitmaps.get(self.selected) {
+            d2d.fill_rounded_bitmap(bmp, prev_rect, 12.0, 1.0);
         }
+        d2d.draw_rounded_rect(prev_rect, 12.0, style::rgba(1.0, 1.0, 1.0, 0.14), 1.0);
 
-        d2d.draw_rounded_rect(prev_rect, 20.0, accent, 2.5);
-
-        // Hero App Icon Badge in preview top-left
-        if self.selected < icons.len() {
-            if let Some(ref icon_bmp) = icons[self.selected] {
-                let b_rect = D2D_RECT_F {
-                    left: prev_left + 16.0,
-                    top: prev_top + 16.0,
-                    right: prev_left + 54.0,
-                    bottom: prev_top + 54.0,
-                };
-                d2d.fill_rounded_rect(
-                    b_rect,
-                    10.0,
-                    D2D1_COLOR_F {
-                        r: 0.04,
-                        g: 0.05,
-                        b: 0.08,
-                        a: 0.88,
-                    },
-                );
-                d2d.draw_rounded_rect(
-                    b_rect,
-                    10.0,
-                    D2D1_COLOR_F {
-                        r: 1.0,
-                        g: 1.0,
-                        b: 1.0,
-                        a: 0.22,
-                    },
-                    1.0,
-                );
-                let ic_rect = D2D_RECT_F {
-                    left: b_rect.left + 5.0,
-                    top: b_rect.top + 5.0,
-                    right: b_rect.right - 5.0,
-                    bottom: b_rect.bottom - 5.0,
-                };
-                d2d.draw_bitmap(icon_bmp, ic_rect, 1.0);
-            }
-        }
-
-        // Title Pill
-        if self.selected < windows.len() {
-            let active_title = &windows[self.selected].title;
-            let title_display = if active_title.chars().count() > 50 {
-                format!("{}...", active_title.chars().take(50).collect::<String>())
-            } else {
-                active_title.clone()
-            };
-            let pill_h = 36.0;
-            let pill_y = title_y;
-            let pill_w = (title_display.len() as f32 * 8.0 + 70.0).clamp(240.0, 600.0);
-            let pill_rect = D2D_RECT_F {
-                left: (sw - pill_w) * 0.5,
-                top: pill_y,
-                right: (sw + pill_w) * 0.5,
-                bottom: pill_y + pill_h,
-            };
-            d2d.fill_rounded_rect(
-                pill_rect,
-                18.0,
-                D2D1_COLOR_F {
-                    r: 0.05,
-                    g: 0.07,
-                    b: 0.10,
-                    a: 0.88,
+        // App icon badge in the preview's top-left corner
+        if let Some(Some(icon_bmp)) = icons.get(self.selected) {
+            style::icon_tile(
+                d2d,
+                icon_bmp,
+                D2D_RECT_F {
+                    left: prev_left + 14.0,
+                    top: prev_top + 14.0,
+                    right: prev_left + 50.0,
+                    bottom: prev_top + 50.0,
                 },
             );
-            d2d.draw_rounded_rect(
-                pill_rect,
-                18.0,
-                D2D1_COLOR_F {
-                    r: 1.0,
-                    g: 1.0,
-                    b: 1.0,
-                    a: 0.18,
-                },
-                1.0,
-            );
+        }
 
-            if self.selected < icons.len() {
-                if let Some(ref icon_bmp) = icons[self.selected] {
-                    let ic_rect = D2D_RECT_F {
-                        left: pill_rect.left + 10.0,
-                        top: pill_rect.top + 7.0,
-                        right: pill_rect.left + 32.0,
-                        bottom: pill_rect.top + 29.0,
-                    };
-                    d2d.draw_bitmap(icon_bmp, ic_rect, 1.0);
-                }
-            }
-
-            let text_rect = D2D_RECT_F {
-                left: pill_rect.left + 38.0,
-                top: pill_rect.top,
-                right: pill_rect.right - 14.0,
-                bottom: pill_rect.bottom,
-            };
-            d2d.draw_text(
-                &title_display,
-                text_rect,
-                D2D1_COLOR_F {
-                    r: 0.96,
-                    g: 0.97,
-                    b: 1.0,
-                    a: 1.0,
-                },
-                14.0,
-                true,
-                false,
+        // Title pill with the app icon
+        if let Some(w) = windows.get(self.selected) {
+            style::title_pill(
+                d2d,
+                &w.title,
+                icons.get(self.selected).and_then(Option::as_ref),
+                sw * 0.5,
+                title_y,
+                36.0,
+                (sw * 0.7).min(640.0),
             );
         }
 
@@ -233,27 +134,7 @@ impl PickerLayout for HeroLayout {
             right: shelf_left + shelf_w,
             bottom: shelf_top + shelf_h,
         };
-        d2d.fill_rounded_rect(
-            shelf_rect,
-            20.0,
-            D2D1_COLOR_F {
-                r: 0.05,
-                g: 0.07,
-                b: 0.10,
-                a: 0.82,
-            },
-        );
-        d2d.draw_rounded_rect(
-            shelf_rect,
-            20.0,
-            D2D1_COLOR_F {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 0.14,
-            },
-            1.0,
-        );
+        style::surface(d2d, shelf_rect, 16.0, false);
 
         // 2. Bottom Filmstrip
         let film_stride = self.film_w + self.gap;
@@ -276,90 +157,34 @@ impl PickerLayout for HeroLayout {
 
             let is_sel = i == self.selected;
 
-            if is_sel {
-                d2d.draw_glow(card_rect, 12.0, accent, 3);
+            d2d.fill_rounded_rect(card_rect, 8.0, style::THUMB_BG);
+            if let Some(Some(bmp)) = bitmaps.get(i) {
+                d2d.fill_rounded_bitmap(bmp, card_rect, 8.0, if is_sel { 1.0 } else { 0.72 });
             }
-
-            d2d.fill_rounded_rect(
-                card_rect,
-                12.0,
-                D2D1_COLOR_F {
-                    r: 0.1,
-                    g: 0.12,
-                    b: 0.16,
-                    a: if is_sel { 1.0 } else { 0.75 },
-                },
-            );
-
-            if i < bitmaps.len() {
-                if let Some(ref bmp) = bitmaps[i] {
-                    d2d.fill_rounded_bitmap(bmp, card_rect, 12.0, if is_sel { 1.0 } else { 0.75 });
-                }
-            }
-
             if is_sel {
-                d2d.draw_rounded_rect(card_rect, 12.0, accent, 2.5);
+                style::selection(d2d, card_rect, 8.0, accent);
             } else {
-                d2d.draw_rounded_rect(
-                    card_rect,
-                    12.0,
-                    D2D1_COLOR_F {
-                        r: 1.0,
-                        g: 1.0,
-                        b: 1.0,
-                        a: 0.10,
-                    },
-                    1.0,
-                );
+                style::frame(d2d, card_rect, 8.0);
             }
-
-            // Filmstrip Card App Icon Badge
-            if i < icons.len() {
-                if let Some(ref icon_bmp) = icons[i] {
-                    let b_size = 20.0;
-                    let b_pad = 2.5;
-                    let b_rect = D2D_RECT_F {
+            if let Some(Some(icon_bmp)) = icons.get(i) {
+                style::icon_tile(
+                    d2d,
+                    icon_bmp,
+                    D2D_RECT_F {
                         left: x + 6.0,
                         top: y + 6.0,
-                        right: x + 6.0 + b_size + b_pad * 2.0,
-                        bottom: y + 6.0 + b_size + b_pad * 2.0,
-                    };
-                    d2d.fill_rounded_rect(
-                        b_rect,
-                        5.0,
-                        D2D1_COLOR_F {
-                            r: 0.05,
-                            g: 0.07,
-                            b: 0.10,
-                            a: 0.88,
-                        },
-                    );
-                    d2d.draw_rounded_rect(
-                        b_rect,
-                        5.0,
-                        D2D1_COLOR_F {
-                            r: 1.0,
-                            g: 1.0,
-                            b: 1.0,
-                            a: 0.20,
-                        },
-                        1.0,
-                    );
-                    let ic_rect = D2D_RECT_F {
-                        left: b_rect.left + b_pad,
-                        top: b_rect.top + b_pad,
-                        right: b_rect.right - b_pad,
-                        bottom: b_rect.bottom - b_pad,
-                    };
-                    d2d.draw_bitmap(icon_bmp, ic_rect, 1.0);
-                }
+                        right: x + 31.0,
+                        bottom: y + 31.0,
+                    },
+                );
             }
         }
     }
 
     fn hit_test(&self, px: f32, py: f32, windows: &[WindowInfo], sw: f32, sh: f32) -> Option<usize> {
         let count = windows.len();
-        let film_y = sh - 36.0 - self.film_h;
+        // Must match render(): shelf_top = sh - 18 - (film_h + 20), film_y = shelf_top + 10.
+        let film_y = sh - 28.0 - self.film_h;
         let film_stride = self.film_w + self.gap;
         let ox = sw * 0.5 - (self.focus * film_stride) - (self.film_w * 0.5);
 
