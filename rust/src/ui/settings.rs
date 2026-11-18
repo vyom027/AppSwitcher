@@ -499,6 +499,9 @@ impl SettingsDialog {
         self.render();
     }
     fn persist(&mut self, msg: &str) {
+        // Push live-tunable values to the input thread so they apply
+        // immediately instead of after a restart.
+        crate::input::set_sensitivity(self.settings.read().sensitivity);
         self.status = if self.settings.read().save().is_ok() {
             msg.into()
         } else {

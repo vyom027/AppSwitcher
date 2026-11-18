@@ -56,11 +56,7 @@ impl GestureTracker {
         P: Fn() + Send + Sync + 'static,
     {
         Self {
-            threshold: if threshold > 30.0 {
-                threshold
-            } else {
-                DEFAULT_SWIPE_THRESHOLD
-            },
+            threshold: Self::sanitize_threshold(threshold),
             active: false,
             base_x: 0.0,
             base_y: 0.0,
@@ -79,6 +75,19 @@ impl GestureTracker {
             on_arm: on_arm.map(|a| Box::new(a) as Box<dyn Fn() + Send + Sync>),
             on_pinch: on_pinch.map(|p| Box::new(p) as Box<dyn Fn() + Send + Sync>),
         }
+    }
+
+    fn sanitize_threshold(threshold: f64) -> f64 {
+        if threshold.is_finite() && threshold > 0.0 {
+            threshold
+        } else {
+            DEFAULT_SWIPE_THRESHOLD
+        }
+    }
+
+    /// Update the swipe travel threshold without restarting the input thread.
+    pub fn set_threshold(&mut self, threshold: f64) {
+        self.threshold = Self::sanitize_threshold(threshold);
     }
 
     fn reset(&mut self) {

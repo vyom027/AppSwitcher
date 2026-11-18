@@ -84,6 +84,9 @@ impl Drop for SearchModeGuard {
     }
 }
 
+/// Close the picker after this long with no user activity.
+const PICKER_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
+
 fn move_within(candidates: &[usize], selected: usize, direction: i32) -> (usize, usize) {
     if candidates.is_empty() {
         return (selected, 0);
@@ -389,6 +392,7 @@ impl OverlayWindow {
         mode: PickerMode,
         use_ctrl: bool,
         sensitivity: f32,
+        dock_mag: f32,
         event_rx: &Receiver<AppEvent>,
     ) -> Option<(usize, Option<ImageBuffer>, Option<ImageBuffer>)> {
         let _guard = OverlayGuard(self);
@@ -404,7 +408,12 @@ impl OverlayWindow {
             "hero" => Box::new(HeroLayout::default()),
             "expose_cloud" => Box::new(ExposeCloudLayout::default()),
             "spotlight" => Box::new(SpotlightLayout::default()),
-            _ => Box::new(DockLayout::default()),
+            _ => {
+                let mut dock = DockLayout::default();
+                // Settings slider range is 1.2-2.6; guard against hand-edited files.
+                dock.mag = dock_mag.clamp(1.0, 3.0);
+                Box::new(dock)
+            }
         };
 
         // 1. Load frosted desktop backdrop
@@ -532,6 +541,10 @@ impl OverlayWindow {
         self.show(true);
         let show_start = Instant::now();
         let fade_dur = 0.12f32;
+        let mut last_activity = show_start;
+        let mut last_target = spring.target;
+        let mut last_cursor = (i32::MIN, i32::MIN);
+        let mut last_query_len = 0usize;
 
         loop {
             let dt = last_frame.elapsed().as_secs_f64();
@@ -678,8 +691,26 @@ impl OverlayWindow {
                 }
             }
 
-            // Hard watchdog timeout: Never allow picker to remain stuck for more than 8 seconds
-            if show_start.elapsed() > Duration::from_secs(8) {
+            // Idle watchdog: guards against a picker stranded by a missed
+            // key-up or a touchpad that stopped reporting. It only counts
+            // time with no navigation, typing or mouse movement, so browsing
+            // or searching is never cut off. Preview mode was opened
+            // deliberately from Settings and is always dismissable (Esc,
+            // click), so it has no timeout.
+            let mut cursor = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut cursor);
+            }
+            if spring.target != last_target
+                || (cursor.x, cursor.y) != last_cursor
+                || search_query.len() != last_query_len
+            {
+                last_target = spring.target;
+                last_cursor = (cursor.x, cursor.y);
+                last_query_len = search_query.len();
+                last_activity = Instant::now();
+            }
+            if mode != PickerMode::Preview && last_activity.elapsed() > PICKER_IDLE_TIMEOUT {
                 commit_selection = false;
                 break;
             }

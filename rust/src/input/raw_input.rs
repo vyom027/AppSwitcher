@@ -220,9 +220,7 @@ pub fn run_input_thread(
         }
     };
 
-    // Reduce required travel by about 25% at the same setting. Smaller values
-    // mean a swipe registers with less finger movement.
-    let swipe_threshold = (sensitivity as f64 * 0.15).clamp(20.0, 60.0);
+    let swipe_threshold = swipe_threshold_for(sensitivity);
     *TRACKER.lock() = Some(GestureTracker::new(
         swipe_threshold,
         on_swipe,
@@ -304,6 +302,19 @@ pub fn run_input_thread(
     }
 
     Ok(())
+}
+
+/// Map the Settings "Swipe sensitivity" value (120-400) to swipe travel.
+/// Smaller values mean a swipe registers with less finger movement.
+fn swipe_threshold_for(sensitivity: i32) -> f64 {
+    (sensitivity as f64 * 0.15).clamp(20.0, 60.0)
+}
+
+/// Apply a new swipe sensitivity to the running gesture tracker.
+pub fn set_sensitivity(sensitivity: i32) {
+    if let Some(ref mut tracker) = *TRACKER.lock() {
+        tracker.set_threshold(swipe_threshold_for(sensitivity));
+    }
 }
 
 pub fn stop_input_thread() {

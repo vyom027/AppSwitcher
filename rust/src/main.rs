@@ -265,7 +265,7 @@ fn main() {
                 while let Ok(event) = event_rx.try_recv() {
                     match event {
                         AppEvent::AltTab { direction } => {
-                            let (blocklist, layout_name, accent_rgb, use_ctrl, sensitivity) = {
+                            let (blocklist, layout_name, accent_rgb, use_ctrl, sensitivity, dock_mag) = {
                                 let cfg = settings.read();
                                 (
                                     cfg.blocklist.clone(),
@@ -273,6 +273,7 @@ fn main() {
                                     cfg.accent,
                                     cfg.hotkey_mod.eq_ignore_ascii_case("ctrl"),
                                     cfg.sensitivity as f32,
+                                    cfg.dock_mag as f32,
                                 )
                             };
                             let mru = sort_by_mru(get_open_windows(&blocklist, false));
@@ -331,6 +332,7 @@ fn main() {
                                     PickerMode::AltTab,
                                     use_ctrl,
                                     sensitivity,
+                                    dock_mag,
                                     &event_rx,
                                 ) {
                                     commit_window_switch(
@@ -340,7 +342,7 @@ fn main() {
                             }
                         }
                         AppEvent::PreviewPicker => {
-                            let (blocklist, layout_name, accent_rgb, use_ctrl, sensitivity) = {
+                            let (blocklist, layout_name, accent_rgb, use_ctrl, sensitivity, dock_mag) = {
                                 let cfg = settings.read();
                                 (
                                     cfg.blocklist.clone(),
@@ -348,6 +350,7 @@ fn main() {
                                     cfg.accent,
                                     cfg.hotkey_mod.eq_ignore_ascii_case("ctrl"),
                                     cfg.sensitivity as f32,
+                                    cfg.dock_mag as f32,
                                 )
                             };
                             let mru = sort_by_mru(get_open_windows(&blocklist, false));
@@ -366,6 +369,7 @@ fn main() {
                                     PickerMode::Preview,
                                     use_ctrl,
                                     sensitivity,
+                                    dock_mag,
                                     &event_rx,
                                 ) {
                                     commit_window_switch(
@@ -402,7 +406,7 @@ fn main() {
                             }
                         }
                         AppEvent::Hold => {
-                            let (blocklist, layout_name, accent_rgb, use_ctrl, sensitivity) = {
+                            let (blocklist, layout_name, accent_rgb, use_ctrl, sensitivity, dock_mag) = {
                                 let cfg = settings.read();
                                 (
                                     cfg.blocklist.clone(),
@@ -410,6 +414,7 @@ fn main() {
                                     cfg.accent,
                                     cfg.hotkey_mod.eq_ignore_ascii_case("ctrl"),
                                     cfg.sensitivity as f32,
+                                    cfg.dock_mag as f32,
                                 )
                             };
                             let mru = sort_by_mru(get_open_windows(&blocklist, false));
@@ -428,6 +433,7 @@ fn main() {
                                     PickerMode::Touchpad,
                                     use_ctrl,
                                     sensitivity,
+                                    dock_mag,
                                     &event_rx,
                                 ) {
                                     commit_window_switch(

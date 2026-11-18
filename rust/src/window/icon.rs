@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::LazyLock;
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
     ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
@@ -18,36 +18,47 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GCLP_HICON, GCLP_HICONSM, HICON, ICONINFO, ICON_BIG, ICON_SMALL, SMTO_ABORTIFHUNG, WM_GETICON,
 };
 
-static ICON_CACHE: LazyLock<Mutex<HashMap<isize, ImageBuffer>>> =
+/// Keyed by (window handle, owning process id). Windows reuses HWND values,
+/// so the pid guards against showing a closed window's icon on a new one.
+static ICON_CACHE: LazyLock<Mutex<HashMap<(isize, u32), ImageBuffer>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+const MAX_ICON_CACHE_ENTRIES: usize = 128;
 
 pub fn get_window_icon(hwnd: HWND) -> Option<ImageBuffer> {
-    let raw = hwnd.0 as isize;
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    let key = (hwnd.0 as isize, pid);
     {
         let cache = ICON_CACHE.lock();
-        if let Some(img) = cache.get(&raw) {
+        if let Some(img) = cache.get(&key) {
             return Some(img.clone());
         }
     }
 
-    let hicon = extract_hicon(hwnd);
-    if let Some(icon) = hicon {
-        if let Some(buf) = hicon_to_image(icon, 32, 32) {
-            unsafe {
-                let _ = DestroyIcon(icon);
-            }
-            ICON_CACHE.lock().insert(raw, buf.clone());
-            return Some(buf);
-        }
+    let (icon, owned) = extract_hicon(hwnd)?;
+    let buf = hicon_to_image(icon, 32, 32);
+    // Icons from WM_GETICON / GetClassLongPtr belong to the target window or
+    // its class and must never be destroyed by us; only icons we extracted
+    // ourselves (ExtractIconExW) are ours to free.
+    if owned {
         unsafe {
             let _ = DestroyIcon(icon);
         }
     }
 
-    None
+    let buf = buf?;
+    let mut cache = ICON_CACHE.lock();
+    if cache.len() >= MAX_ICON_CACHE_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(key, buf.clone());
+    Some(buf)
 }
 
-fn extract_hicon(hwnd: HWND) -> Option<HICON> {
+/// Returns the icon and whether the caller owns it (and must DestroyIcon it).
+fn extract_hicon(hwnd: HWND) -> Option<(HICON, bool)> {
     unsafe {
         let mut result = 0usize;
 
@@ -62,7 +73,7 @@ fn extract_hicon(hwnd: HWND) -> Option<HICON> {
             Some(&mut result),
         );
         if ok.0 != 0 && result != 0 {
-            return Some(HICON(result as *mut _));
+            return Some((HICON(result as *mut _), false));
         }
 
         // 2. WM_GETICON (ICON_SMALL)
@@ -76,18 +87,18 @@ fn extract_hicon(hwnd: HWND) -> Option<HICON> {
             Some(&mut result),
         );
         if ok.0 != 0 && result != 0 {
-            return Some(HICON(result as *mut _));
+            return Some((HICON(result as *mut _), false));
         }
 
         // 3. Class icon
         let h = GetClassLongPtrW(hwnd, GCLP_HICON);
         if h != 0 {
-            return Some(HICON(h as *mut _));
+            return Some((HICON(h as *mut _), false));
         }
 
         let h_sm = GetClassLongPtrW(hwnd, GCLP_HICONSM);
         if h_sm != 0 {
-            return Some(HICON(h_sm as *mut _));
+            return Some((HICON(h_sm as *mut _), false));
         }
 
         // 4. Executable icon from process path
@@ -97,14 +108,15 @@ fn extract_hicon(hwnd: HWND) -> Option<HICON> {
             if let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
                 let mut path_buf = [0u16; 1024];
                 let mut size = path_buf.len() as u32;
-                if QueryFullProcessImageNameW(
+                let queried = QueryFullProcessImageNameW(
                     process,
                     PROCESS_NAME_WIN32,
                     PWSTR(path_buf.as_mut_ptr()),
                     &mut size,
                 )
-                .is_ok()
-                {
+                .is_ok();
+                let _ = CloseHandle(process);
+                if queried {
                     let mut large_icon = HICON::default();
                     let mut small_icon = HICON::default();
                     let extracted = ExtractIconExW(
@@ -119,9 +131,9 @@ fn extract_hicon(hwnd: HWND) -> Option<HICON> {
                             if !small_icon.0.is_null() {
                                 let _ = DestroyIcon(small_icon);
                             }
-                            return Some(large_icon);
+                            return Some((large_icon, true));
                         } else if !small_icon.0.is_null() {
-                            return Some(small_icon);
+                            return Some((small_icon, true));
                         }
                     }
                 }

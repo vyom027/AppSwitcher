@@ -3,4 +3,4 @@ pub mod hid_parser;
 pub mod keyboard_hook;
 pub mod raw_input;
 
-pub use raw_input::{get_live_state, run_input_thread, stop_input_thread};
+pub use raw_input::{get_live_state, run_input_thread, set_sensitivity, stop_input_thread};
