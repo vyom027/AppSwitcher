@@ -128,6 +128,13 @@ impl OverlayWindow {
             wc.hInstance = h_instance.into();
             wc.lpszClassName = class_name;
             wc.hbrBackground = HBRUSH(GetStockObject(BLACK_BRUSH).0);
+            // Without a class cursor Windows keeps showing whatever cursor was
+            // last set (often the busy cursor) while over the picker.
+            wc.hCursor = windows::Win32::UI::WindowsAndMessaging::LoadCursorW(
+                None,
+                windows::Win32::UI::WindowsAndMessaging::IDC_ARROW,
+            )
+            .unwrap_or_default();
 
             let _ = RegisterClassExW(&wc);
 
@@ -448,7 +455,7 @@ impl OverlayWindow {
 
         let area = work_area();
         let (sw, sh) = self.sync_to_area(area);
-        let reduce_motion = !crate::animations::system_animations_enabled();
+        let reduce_motion = !crate::animations::motion_allowed();
 
         let mut layout: Box<dyn PickerLayout> = match layout_name.to_lowercase().as_str() {
             "row" => Box::new(RowLayout::default()),

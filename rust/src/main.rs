@@ -115,9 +115,10 @@ fn commit_window_switch(
     let curr_hwnd = mru[0].hwnd;
     let target_hwnd = mru[sel].hwnd;
 
-    // Skip the transition when Windows animations are off, or when the
-    // current window was closed from the picker (nothing to animate from).
-    if !animations::system_animations_enabled() || !unsafe { IsWindow(curr_hwnd) }.as_bool() {
+    // Skip the transition when motion is turned off (opt-in, see
+    // `respect_system_animations`), or when the current window was closed
+    // from the picker (nothing to animate from).
+    if !animations::motion_allowed() || !unsafe { IsWindow(curr_hwnd) }.as_bool() {
         bring_to_front(target_hwnd);
         nudge_cursor();
         return;
@@ -289,6 +290,7 @@ fn main() {
 
     // 3. Load user settings
     let settings = Arc::new(parking_lot::RwLock::new(Settings::load()));
+    animations::set_respect_system_animations(settings.read().respect_system_animations);
     println!("[config] Loaded configuration from %APPDATA%\\AppSwitcher");
 
     // 4. Start MRU focus recency watcher
@@ -520,7 +522,7 @@ fn main() {
                             let curr_hwnd = mru[0].hwnd;
                             let target_hwnd = mru[target_idx].hwnd;
 
-                            if !animations::system_animations_enabled() {
+                            if !animations::motion_allowed() {
                                 bring_to_front(target_hwnd);
                                 nudge_cursor();
                                 continue;

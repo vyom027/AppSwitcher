@@ -325,3 +325,18 @@ pub fn system_animations_enabled() -> bool {
     }
     enabled.as_bool()
 }
+
+static RESPECT_SYSTEM_ANIMATIONS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Mirror the `respect_system_animations` setting (startup and on save).
+pub fn set_respect_system_animations(respect: bool) {
+    RESPECT_SYSTEM_ANIMATIONS.store(respect, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether transitions and picker motion should play. Always true unless the
+/// user opted in to following the Windows "Animation effects" setting.
+pub fn motion_allowed() -> bool {
+    !RESPECT_SYSTEM_ANIMATIONS.load(std::sync::atomic::Ordering::Relaxed)
+        || system_animations_enabled()
+}

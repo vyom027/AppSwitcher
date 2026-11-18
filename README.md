@@ -45,7 +45,7 @@ Inside the picker:
 | Enter or click | Switch to the highlighted window |
 | Esc or click outside the cards | Cancel |
 
-The picker opens on the monitor with the mouse cursor. Right-click the tray icon to open the switcher, pause gestures and Alt+Tab, or open Settings. When **Animation effects** is off in Windows settings, switches happen instantly without a transition.
+The picker opens on the monitor with the mouse cursor. Right-click the tray icon to open the switcher, pause gestures and Alt+Tab, or open Settings. Transitions play even when **Animation effects** is off in Windows settings. To have AppSwitcher follow that Windows setting instead, set `"respect_system_animations": true` in `settings.json`.
 
 The settings include Slide, Duo Fold, Fade, Zoom, Cube, Flip, Push, and Stack animations. Picker layouts are Dock, Row, Hero, Exposé Cloud, and Spotlight. Settings are saved to `%APPDATA%\AppSwitcher\settings.json` on each PC.
 

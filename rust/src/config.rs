@@ -18,6 +18,10 @@ pub struct Settings {
     pub pinch_enabled: bool,
     pub pinch_mods: Vec<u32>,
     pub pinch_vk: u32,
+    /// Skip transitions when Windows "Animation effects" is off. Off by
+    /// default: choosing an animation in AppSwitcher is explicit intent.
+    #[serde(default)]
+    pub respect_system_animations: bool,
 }
 
 impl Default for Settings {
@@ -37,6 +41,7 @@ impl Default for Settings {
             pinch_enabled: true,
             pinch_mods: vec![0x11], // VK_CONTROL
             pinch_vk: 0x09,         // VK_TAB
+            respect_system_animations: false,
         }
     }
 }

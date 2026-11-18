@@ -34,6 +34,10 @@ pub struct GestureTracker {
     pinched: bool,
     swiped: bool,
     last_swipe: Instant,
+    /// Set when a swipe fires; cleared only once the fingers lift (fewer than
+    /// two contacts). One gesture = one switch, however far the fingers travel,
+    /// and a contact briefly dropping out mid-swipe can't re-arm it.
+    swipe_latched: bool,
 
     on_swipe: Box<dyn Fn(i32) + Send + Sync>,
     on_hold_swipe: Box<dyn Fn(i32) + Send + Sync>,
@@ -70,6 +74,7 @@ impl GestureTracker {
             pinched: false,
             swiped: false,
             last_swipe: Instant::now(),
+            swipe_latched: false,
             on_swipe: Box::new(on_swipe),
             on_hold_swipe: Box::new(on_hold_swipe),
             on_arm: on_arm.map(|a| Box::new(a) as Box<dyn Fn() + Send + Sync>),
@@ -118,8 +123,16 @@ impl GestureTracker {
     }
 
     pub fn feed(&mut self, contacts: &HashMap<u32, (f64, f64)>) {
+        if contacts.len() < 2 {
+            self.swipe_latched = false;
+        }
         if contacts.len() != MIN_FINGERS {
             self.reset();
+            return;
+        }
+        if self.swipe_latched {
+            // Already switched for this gesture; ignore the rest of it
+            // (including the stillness dwell that would open the picker).
             return;
         }
 
@@ -189,8 +202,8 @@ impl GestureTracker {
             return;
         }
 
-        // Swipe travel check: Matches Python gesture_hook continuous stepping
-        // Moving past SWIPE_THRESHOLD switches apps, and resets base to allow continuous swiping without lifting
+        // Swipe travel check: moving past the threshold switches once; the
+        // latch above ignores the rest of the gesture until the fingers lift.
         let dx = avg_x - self.base_x;
         let dy = (avg_y - self.base_y).abs();
 
@@ -203,7 +216,75 @@ impl GestureTracker {
             self.base_x = avg_x;
             self.base_y = avg_y;
             self.still_since = now;
+            self.swipe_latched = true;
             (self.on_swipe)(dir);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::Arc;
+
+    fn three_fingers(x: f64) -> HashMap<u32, (f64, f64)> {
+        // Spread wide enough that the pinch detector never triggers.
+        HashMap::from([(1, (x, 100.0)), (2, (x + 150.0, 100.0)), (3, (x + 300.0, 100.0))])
+    }
+
+    fn tracker(count: Arc<AtomicI32>) -> GestureTracker {
+        GestureTracker::new(
+            24.0,
+            move |dir| {
+                count.fetch_add(dir, Ordering::SeqCst);
+            },
+            |_| {},
+            None::<fn()>,
+            None::<fn()>,
+        )
+    }
+
+    /// Feed a swipe of `distance` units in 4-unit steps, ~8ms apart.
+    fn swipe(t: &mut GestureTracker, from: f64, distance: f64) {
+        let steps = (distance.abs() / 4.0) as i32;
+        let step = distance.signum() * 4.0;
+        for i in 0..=steps {
+            t.feed(&three_fingers(from + i as f64 * step));
+            std::thread::sleep(std::time::Duration::from_millis(8));
+        }
+    }
+
+    #[test]
+    fn full_length_swipe_switches_once() {
+        let count = Arc::new(AtomicI32::new(0));
+        let mut t = tracker(count.clone());
+        swipe(&mut t, 0.0, 400.0); // ~16x the threshold
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn lifting_fingers_rearms_the_next_swipe() {
+        let count = Arc::new(AtomicI32::new(0));
+        let mut t = tracker(count.clone());
+        swipe(&mut t, 0.0, 200.0);
+        t.feed(&HashMap::new()); // fingers lifted
+        swipe(&mut t, 0.0, -200.0);
+        // Both swipes fired: +1 then -1.
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        assert!(t.swipe_latched);
+    }
+
+    #[test]
+    fn brief_contact_dropout_does_not_rearm() {
+        let count = Arc::new(AtomicI32::new(0));
+        let mut t = tracker(count.clone());
+        swipe(&mut t, 0.0, 100.0);
+        // One finger drops out for a report, then returns mid-swipe.
+        let mut two = three_fingers(100.0);
+        two.remove(&3);
+        t.feed(&two);
+        swipe(&mut t, 100.0, 200.0);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }

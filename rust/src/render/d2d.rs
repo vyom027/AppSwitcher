@@ -5,13 +5,15 @@ use std::collections::HashMap;
 use windows::core::{w, Interface, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
+    D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap, ID2D1Brush, ID2D1Factory, ID2D1HwndRenderTarget,
     ID2D1RenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1_BITMAP_BRUSH_PROPERTIES, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
-    D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
+    D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2,
+    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
     D2D1_PRESENT_OPTIONS_IMMEDIATELY, D2D1_RENDER_TARGET_PROPERTIES, D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::DirectWrite::{
@@ -63,6 +65,12 @@ pub mod glyph {
     pub const VIEW: char = '\u{E890}';
     pub const KEYBOARD: char = '\u{E765}';
     pub const SEARCH: char = '\u{E721}';
+    pub const SETTINGS: char = '\u{E713}';
+    pub const POWER: char = '\u{E7E8}';
+    pub const FOLDER: char = '\u{E8B7}';
+    pub const INFO: char = '\u{E946}';
+    pub const TOUCH: char = '\u{E7C9}';
+    pub const COLOR: char = '\u{E790}';
 }
 
 type FormatKey = (Font, u32, u32, Align, bool);
@@ -333,6 +341,60 @@ impl D2DContext {
                 }
                 Err(_) => 0.0,
             }
+        }
+    }
+
+    /// Fill a rounded rect with a linear gradient running from `from` to `to`
+    /// (absolute coordinates). `stops` are (offset 0..1, colour) pairs.
+    pub fn fill_rounded_gradient(
+        &self,
+        rect: D2D_RECT_F,
+        radius: f32,
+        from: (f32, f32),
+        to: (f32, f32),
+        stops: &[(f32, D2D1_COLOR_F)],
+    ) {
+        let stops: Vec<D2D1_GRADIENT_STOP> = stops
+            .iter()
+            .map(|&(position, color)| D2D1_GRADIENT_STOP { position, color })
+            .collect();
+        unsafe {
+            let Ok(collection) =
+                self.rt
+                    .CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
+            else {
+                return;
+            };
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                startPoint: D2D_POINT_2F { x: from.0, y: from.1 },
+                endPoint: D2D_POINT_2F { x: to.0, y: to.1 },
+            };
+            let Ok(brush) = self.rt.CreateLinearGradientBrush(&props, None, &collection) else {
+                return;
+            };
+            let Ok(brush) = brush.cast::<ID2D1Brush>() else {
+                return;
+            };
+            let rounded = D2D1_ROUNDED_RECT {
+                rect,
+                radiusX: radius,
+                radiusY: radius,
+            };
+            self.rt.FillRoundedRectangle(&rounded, &brush);
+        }
+    }
+
+    /// Clip subsequent drawing to `rect` until `pop_clip`.
+    pub fn push_clip(&self, rect: D2D_RECT_F) {
+        unsafe {
+            self.rt
+                .PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        }
+    }
+
+    pub fn pop_clip(&self) {
+        unsafe {
+            self.rt.PopAxisAlignedClip();
         }
     }
 
