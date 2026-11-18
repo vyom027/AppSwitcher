@@ -12,6 +12,8 @@ pub enum AppEvent {
     Pinch,
     /// Alt+Tab hotkey chord pressed (+1 = next, -1 = prev with shift)
     AltTab { direction: i32 },
+    /// Alt+` pressed: cycle windows of the foreground app (-1 with shift)
+    AltTabSameApp { direction: i32 },
     /// Alt/Ctrl modifier released after Alt+Tab
     AltTabRelease,
     /// Open the picker from Settings for an interactive preview.

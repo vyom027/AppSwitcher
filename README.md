@@ -30,7 +30,22 @@ The EXE contains its icon and the Microsoft C runtime. No Python installation or
 | Move fingers in the picker | Change the highlighted app |
 | Lift fingers | Select the highlighted app |
 | Alt+Tab or configured shortcut | Open the keyboard picker |
+| Alt+` | Cycle between windows of the current app |
 | Three-finger pinch | Send the configured shortcut |
+
+Inside the picker:
+
+| Input | Action |
+| --- | --- |
+| Arrow keys, Tab, mouse wheel | Move the highlight |
+| Hover with the mouse | Highlight the card under the cursor |
+| Home / End | Jump to the first or last window |
+| 1–9 | Switch to that window immediately |
+| Q, W, Delete, or middle-click | Close that window; the picker stays open |
+| Enter or click | Switch to the highlighted window |
+| Esc or click outside the cards | Cancel |
+
+The picker opens on the monitor with the mouse cursor. Right-click the tray icon to open the switcher, pause gestures and Alt+Tab, or open Settings. When **Animation effects** is off in Windows settings, switches happen instantly without a transition.
 
 The settings include Slide, Duo Fold, Fade, Zoom, Cube, Flip, Push, and Stack animations. Picker layouts are Dock, Row, Hero, Exposé Cloud, and Spotlight. Settings are saved to `%APPDATA%\AppSwitcher\settings.json` on each PC.
 

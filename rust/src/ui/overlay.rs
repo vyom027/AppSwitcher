@@ -8,7 +8,9 @@ use crate::layouts::spotlight::SpotlightLayout;
 use crate::layouts::{draw_liquid_glass, PickerLayout};
 use crate::render::d2d::D2DContext;
 use crate::render::spring::{Spring, SpringConfig};
-use crate::window::capture::{capture_windows_parallel, get_backdrop, work_area, ImageBuffer};
+use crate::window::capture::{
+    capture_windows_parallel, get_backdrop, window_work_area, work_area, ImageBuffer,
+};
 use crate::window::enumerator::WindowInfo;
 use crate::window::foreground::{bring_to_front, nudge_cursor};
 use crossbeam_channel::Receiver;
@@ -29,7 +31,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LEFT, VK_MBUTTON, VK_MENU, VK_RETURN, VK_RIGHT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, PeekMessageW, PostMessageW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetForegroundWindow, IsWindow,
+    PeekMessageW, PostMessageW,
     RegisterClassExW, SetWindowPos, TranslateMessage, HWND_TOPMOST, MSG, PM_REMOVE, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, WM_CLOSE, WM_QUIT, WNDCLASSEXW, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
@@ -46,6 +49,10 @@ pub struct OverlayWindow {
     pub hwnd: HWND,
     pub width: std::sync::atomic::AtomicU32,
     pub height: std::sync::atomic::AtomicU32,
+    /// Screen position of the overlay's top-left corner; layouts work in
+    /// client coordinates, so cursor positions are offset by this.
+    origin_x: std::sync::atomic::AtomicI32,
+    origin_y: std::sync::atomic::AtomicI32,
     pub d2d: D2DContext,
 }
 
@@ -64,6 +71,12 @@ unsafe extern "system" fn overlay_wnd_proc(
             let mut ps = windows::Win32::Graphics::Gdi::PAINTSTRUCT::default();
             let _ = windows::Win32::Graphics::Gdi::BeginPaint(hwnd, &mut ps);
             let _ = windows::Win32::Graphics::Gdi::EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_MOUSEWHEEL => {
+            // High word of wParam is the signed wheel delta (120 per notch).
+            let delta = ((w_param.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+            WHEEL_ACCUM.fetch_add(delta, std::sync::atomic::Ordering::SeqCst);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, w_param, l_param),
@@ -160,13 +173,18 @@ impl OverlayWindow {
                 hwnd,
                 width: std::sync::atomic::AtomicU32::new(width),
                 height: std::sync::atomic::AtomicU32::new(height),
+                origin_x: std::sync::atomic::AtomicI32::new(wx),
+                origin_y: std::sync::atomic::AtomicI32::new(wy),
                 d2d,
             })
         }
     }
 
-    pub fn sync_work_area(&self) -> (f32, f32) {
-        let (wx, wy, ww, wh) = work_area();
+    /// Move/resize the overlay to cover `area` (x, y, w, h in screen pixels).
+    pub fn sync_to_area(&self, area: (i32, i32, i32, i32)) -> (f32, f32) {
+        let (wx, wy, ww, wh) = area;
+        self.origin_x.store(wx, std::sync::atomic::Ordering::SeqCst);
+        self.origin_y.store(wy, std::sync::atomic::Ordering::SeqCst);
         let ww_u = ww.max(100) as u32;
         let wh_u = wh.max(100) as u32;
 
@@ -182,6 +200,18 @@ impl OverlayWindow {
         }
 
         (ww as f32, wh as f32)
+    }
+
+    /// Cursor position in overlay client coordinates (what layouts use).
+    fn cursor_in_client(&self) -> (f32, f32) {
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
+        (
+            (pt.x - self.origin_x.load(std::sync::atomic::Ordering::Relaxed)) as f32,
+            (pt.y - self.origin_y.load(std::sync::atomic::Ordering::Relaxed)) as f32,
+        )
     }
 
     pub fn show(&self, clickable: bool) {
@@ -229,10 +259,19 @@ impl OverlayWindow {
         commit_focus: bool,
     ) {
         let _guard = OverlayGuard(self);
-        let (sw, sh) = self.sync_work_area();
+        // Play the transition on the monitor of the window being left.
+        let area = unsafe {
+            let fg = GetForegroundWindow();
+            if fg.0.is_null() || crate::window::foreground::is_own_window(fg) {
+                work_area()
+            } else {
+                window_work_area(fg)
+            }
+        };
+        let (sw, sh) = self.sync_to_area(area);
 
         // 1. Capture backdrop and create bitmaps BEFORE revealing the window!
-        let bg = get_backdrop();
+        let bg = get_backdrop(area);
         let bg_bmp = self
             .d2d
             .create_bitmap_from_rgba(bg.width, bg.height, &bg.pixels)
@@ -382,7 +421,11 @@ impl OverlayWindow {
         }
     }
 
-    /// Interactive App Picker Modal with 7 interchangeable layouts & spring physics
+    /// Interactive App Picker Modal with interchangeable layouts & spring physics.
+    ///
+    /// Returns the selected index into `windows` (the caller's original list,
+    /// even if cards were closed from the picker) plus the captured frames of
+    /// the current and selected windows for the follow-up transition.
     pub fn run_picker(
         &self,
         windows: &[WindowInfo],
@@ -396,12 +439,16 @@ impl OverlayWindow {
         event_rx: &Receiver<AppEvent>,
     ) -> Option<(usize, Option<ImageBuffer>, Option<ImageBuffer>)> {
         let _guard = OverlayGuard(self);
-        let n = windows.len();
-        if n == 0 {
+        let original = windows;
+        if original.is_empty() {
             return None;
         }
+        // Owned copy: cards can be removed when their window is closed.
+        let mut windows: Vec<WindowInfo> = original.to_vec();
 
-        let (sw, sh) = self.sync_work_area();
+        let area = work_area();
+        let (sw, sh) = self.sync_to_area(area);
+        let reduce_motion = !crate::animations::system_animations_enabled();
 
         let mut layout: Box<dyn PickerLayout> = match layout_name.to_lowercase().as_str() {
             "row" => Box::new(RowLayout::default()),
@@ -417,13 +464,13 @@ impl OverlayWindow {
         };
 
         // 1. Load frosted desktop backdrop
-        let bg = get_backdrop();
+        let bg = get_backdrop(area);
         let bg_bmp = self
             .d2d
             .create_bitmap_from_rgba(bg.width, bg.height, &bg.pixels)
             .ok();
 
-        // 2. Concurrently capture thumbnails in parallel (Eliminates all UI lag!)
+        // 2. Concurrently capture thumbnails in parallel
         let hwnds: Vec<HWND> = windows.iter().map(|w| w.hwnd).collect();
         let mut raw_images = capture_windows_parallel(&hwnds);
 
@@ -438,44 +485,41 @@ impl OverlayWindow {
             })
             .collect();
 
-        // Single, clean live thumbnail background refresh worker (updates every 2.5s matching Python)
+        // Live thumbnail refresh worker (every 2.5s). Frames are tagged with
+        // the window handle, not an index, because cards can be removed.
         let (refresh_tx, refresh_rx) = crossbeam_channel::unbounded::<(usize, ImageBuffer)>();
         let picker_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let _stop_refresh = StopFlagGuard(std::sync::Arc::clone(&picker_active));
         let bg_active = std::sync::Arc::clone(&picker_active);
         let bg_hwnds: Vec<usize> = hwnds.iter().map(|h| h.0 as usize).collect();
 
         thread::spawn(move || {
             while bg_active.load(std::sync::atomic::Ordering::Relaxed) {
-                // Sleep in 100ms intervals so thread exits promptly on picker close
                 for _ in 0..25 {
                     thread::sleep(Duration::from_millis(100));
                     if !bg_active.load(std::sync::atomic::Ordering::Relaxed) {
                         return;
                     }
                 }
-                for (idx, &raw_h) in bg_hwnds.iter().enumerate() {
+                for &raw_h in &bg_hwnds {
                     if !bg_active.load(std::sync::atomic::Ordering::Relaxed) {
                         return;
                     }
                     let h = HWND(raw_h as *mut _);
+                    if !unsafe { IsWindow(h) }.as_bool() {
+                        continue;
+                    }
                     if let Some(img) = crate::window::capture::capture_window_image_uncached(h) {
-                        let mut has_color = false;
-                        for px in img.pixels.chunks_exact(16) {
-                            if px[0] > 15 || px[1] > 15 || px[2] > 15 {
-                                has_color = true;
-                                break;
-                            }
-                        }
-                        if has_color {
-                            let _ = refresh_tx.send((idx, img));
+                        if has_visible_content(&img) {
+                            let _ = refresh_tx.send((raw_h, img));
                         }
                     }
                 }
             }
         });
 
-        // 3. Concurrently retrieve window icons
-        let icons: Vec<Option<ID2D1Bitmap>> = windows
+        // 3. Window icons
+        let mut icons: Vec<Option<ID2D1Bitmap>> = windows
             .iter()
             .map(|w| {
                 crate::window::get_window_icon(w.hwnd).and_then(|img| {
@@ -486,7 +530,7 @@ impl OverlayWindow {
             })
             .collect();
 
-        let initial = initial_idx.min(n - 1);
+        let initial = initial_idx.min(windows.len() - 1);
         let mut spring = Spring::new(initial as f64, SpringConfig::SNAPPY);
         let mut selected = initial;
 
@@ -499,22 +543,23 @@ impl OverlayWindow {
         let mut last_frame = Instant::now();
         let mut prev_left = false;
         let mut prev_right = false;
+        let mut prev_mbutton = false;
 
-        // Top Pill Hint Text
         let hint_text = match mode {
             PickerMode::AltTab => {
                 let mod_name = if use_ctrl { "Ctrl" } else { "Alt" };
                 format!(
-                    "hold {} · Tab to cycle · release {} to switch · Middle-click close · Esc cancel",
-                    mod_name, mod_name
+                    "Tab · arrows · wheel to move · release {} to switch · Q close window · Esc cancel",
+                    mod_name
                 )
             }
             PickerMode::Touchpad => {
-                "glide fingers to pick · lift to switch · Middle-click close · Esc cancel"
+                "glide fingers to pick · lift to switch · Q / middle-click close · Esc cancel"
                     .to_string()
             }
             PickerMode::Preview => {
-                "Preview · click a window or press Enter to switch · Esc to close".to_string()
+                "click or press Enter to switch · 1-9 jump · Q close window · Esc close"
+                    .to_string()
             }
         };
 
@@ -523,7 +568,7 @@ impl OverlayWindow {
             let mod_vk = if use_ctrl { VK_CONTROL } else { VK_MENU };
             let is_mod_down = unsafe { (GetAsyncKeyState(mod_vk.0 as i32) as u16 & 0x8000) != 0 };
             if !is_mod_down {
-                let curr_img = raw_images.get(0).cloned().flatten();
+                let curr_img = raw_images.first().cloned().flatten();
                 let next_img = raw_images.get(initial).cloned().flatten();
                 return Some((initial, curr_img, next_img));
             }
@@ -536,55 +581,54 @@ impl OverlayWindow {
         } else {
             None
         };
+        crate::input::keyboard_hook::set_picker_mode(true);
+        let _picker_keys = PickerKeysGuard;
+        let hook_keys = crate::input::keyboard_hook::is_installed();
+        WHEEL_ACCUM.store(0, std::sync::atomic::Ordering::SeqCst);
         let mut search_query = String::new();
 
         self.show(true);
         let show_start = Instant::now();
-        let fade_dur = 0.12f32;
+        let fade_dur = if reduce_motion { 0.0 } else { 0.12f32 };
         let mut last_activity = show_start;
         let mut last_target = spring.target;
-        let mut last_cursor = (i32::MIN, i32::MIN);
         let mut last_query_len = 0usize;
+        // Hover only reacts to real cursor movement, never to where the
+        // cursor happened to be resting when the picker opened.
+        let mut hover_cursor = self.cursor_in_client();
 
         loop {
             let dt = last_frame.elapsed().as_secs_f64();
             last_frame = Instant::now();
 
-            // 1. Process Windows Messages & Channel Events
-            let mut msg = MSG::default();
             let mut should_exit = false;
-            let mut candidates = layout.visible_indices(windows);
+            let mut candidates = layout.visible_indices(&windows);
+            // Navigation requested this frame: a relative step and/or an
+            // absolute position within `candidates`.
+            let mut step: i32 = 0;
+            let mut jump_to: Option<usize> = None;
+            let mut close_request: Option<usize> = None;
 
+            // 1. Process Windows Messages & Channel Events
             unsafe {
+                let mut msg = MSG::default();
                 while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                     if msg.message == WM_QUIT {
-                        self.hide();
                         return None;
                     }
                     if msg.message == WM_APP_EVENT {
                         while let Ok(event) = event_rx.try_recv() {
                             match event {
-                                AppEvent::AltTab { direction } => {
-                                    let (idx, position) =
-                                        move_within(&candidates, selected, direction);
-                                    selected = idx;
-                                    spring.set_target(position as f64);
-                                }
+                                AppEvent::AltTab { direction }
+                                | AppEvent::AltTabSameApp { direction } => step += direction,
                                 AppEvent::AltTabRelease => {
                                     if mode == PickerMode::AltTab {
                                         commit_selection = !candidates.is_empty();
                                         should_exit = true;
                                     }
                                 }
-                                AppEvent::Swipe(dir) => {
-                                    let (idx, position) = move_within(&candidates, selected, dir);
-                                    selected = idx;
-                                    spring.set_target(position as f64);
-                                }
-                                AppEvent::Quit => {
-                                    self.hide();
-                                    return None;
-                                }
+                                AppEvent::Swipe(dir) => step += dir,
+                                AppEvent::Quit => return None,
                                 _ => {}
                             }
                         }
@@ -624,7 +668,7 @@ impl OverlayWindow {
                 }
                 if changed {
                     layout.set_query(&search_query);
-                    candidates = layout.visible_indices(windows);
+                    candidates = layout.visible_indices(&windows);
                     let position = candidates
                         .iter()
                         .position(|&idx| idx == selected)
@@ -636,26 +680,18 @@ impl OverlayWindow {
                 }
             }
 
-            // Receive any background refreshed live frames (strictly guard against blank/black frames)
-            while let Ok((idx, img)) = refresh_rx.try_recv() {
-                let mut valid = false;
-                for px in img.pixels.chunks_exact(16) {
-                    if px[0] > 15 || px[1] > 15 || px[2] > 15 {
-                        valid = true;
-                        break;
-                    }
-                }
-                if valid {
+            // Background-refreshed live frames
+            while let Ok((raw_h, img)) = refresh_rx.try_recv() {
+                let Some(idx) = windows.iter().position(|w| w.hwnd.0 as usize == raw_h) else {
+                    continue;
+                };
+                if has_visible_content(&img) {
                     if let Ok(bmp) =
                         self.d2d
                             .create_bitmap_from_rgba(img.width, img.height, &img.pixels)
                     {
-                        if idx < bitmaps.len() {
-                            bitmaps[idx] = Some(bmp);
-                        }
-                        if idx < raw_images.len() {
-                            raw_images[idx] = Some(img);
-                        }
+                        bitmaps[idx] = Some(bmp);
+                        raw_images[idx] = Some(img);
                     }
                 }
             }
@@ -666,7 +702,7 @@ impl OverlayWindow {
                 let is_mod_down =
                     unsafe { (GetAsyncKeyState(mod_vk.0 as i32) as u16 & 0x8000) != 0 };
                 if !is_mod_down {
-                    commit_selection = true;
+                    commit_selection = !candidates.is_empty();
                     break;
                 }
             } else if mode == PickerMode::Touchpad {
@@ -678,12 +714,12 @@ impl OverlayWindow {
                         fnav_armed = true;
                     }
                     let dx = live.avg_x - fnav_base_x.unwrap();
-                    let step = sensitivity.max(80.0) as f64;
-                    let target_f =
-                        (fnav_base_focus + dx / step).clamp(0.0, (candidates.len() - 1) as f64);
+                    let step_px = sensitivity.max(80.0) as f64;
+                    let target_f = (fnav_base_focus + dx / step_px)
+                        .clamp(0.0, (candidates.len() - 1) as f64);
                     spring.set_target(target_f);
                 } else if live.count == 0 {
-                    // Fingers lifted! If armed or if fingers were already lifted after brief grace period (120ms):
+                    // Fingers lifted after arming, or never on the pad after a short grace period.
                     if fnav_armed || show_start.elapsed() > Duration::from_millis(120) {
                         commit_selection = !candidates.is_empty();
                         break;
@@ -691,31 +727,41 @@ impl OverlayWindow {
                 }
             }
 
-            // Idle watchdog: guards against a picker stranded by a missed
-            // key-up or a touchpad that stopped reporting. It only counts
-            // time with no navigation, typing or mouse movement, so browsing
-            // or searching is never cut off. Preview mode was opened
-            // deliberately from Settings and is always dismissable (Esc,
-            // click), so it has no timeout.
-            let mut cursor = POINT::default();
-            unsafe {
-                let _ = GetCursorPos(&mut cursor);
+            // 3. Keyboard: keys queued by the low-level hook (swallowed so
+            // they never reach the app underneath).
+            for vk in crate::input::keyboard_hook::take_picker_keys() {
+                match vk {
+                    0x1B => {
+                        should_exit = true;
+                        commit_selection = false;
+                    }
+                    0x0D => {
+                        should_exit = true;
+                        commit_selection = !candidates.is_empty();
+                    }
+                    0x25 | 0x26 => step -= 1, // Left, Up
+                    0x27 | 0x28 => step += 1, // Right, Down
+                    0x24 => jump_to = Some(0), // Home
+                    0x23 => jump_to = Some(candidates.len().saturating_sub(1)), // End
+                    0x31..=0x39 => {
+                        // 1-9: jump straight to that card and switch.
+                        let pos = (vk - 0x31) as usize;
+                        if let Some(&idx) = candidates.get(pos) {
+                            selected = idx;
+                            commit_selection = true;
+                            should_exit = true;
+                        }
+                    }
+                    0x51 | 0x57 | 0x2E => close_request = Some(selected), // Q, W, Delete
+                    _ => {}
+                }
             }
-            if spring.target != last_target
-                || (cursor.x, cursor.y) != last_cursor
-                || search_query.len() != last_query_len
-            {
-                last_target = spring.target;
-                last_cursor = (cursor.x, cursor.y);
-                last_query_len = search_query.len();
-                last_activity = Instant::now();
-            }
-            if mode != PickerMode::Preview && last_activity.elapsed() > PICKER_IDLE_TIMEOUT {
-                commit_selection = false;
+            if should_exit {
                 break;
             }
 
-            // Keyboard & Mouse navigation checks
+            // Fallback key polling for when the hook is unavailable. With the
+            // hook installed these keys are swallowed and never show up here.
             unsafe {
                 if (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000) != 0 {
                     commit_selection = false;
@@ -725,40 +771,48 @@ impl OverlayWindow {
                     commit_selection = !candidates.is_empty();
                     break;
                 }
-
-                // Left / Right arrow navigation
-                let cur_left = (GetAsyncKeyState(VK_LEFT.0 as i32) as u16 & 0x8000) != 0;
-                let cur_right = (GetAsyncKeyState(VK_RIGHT.0 as i32) as u16 & 0x8000) != 0;
-
-                if cur_left && !prev_left {
-                    let (idx, position) = move_within(&candidates, selected, -1);
-                    selected = idx;
-                    spring.set_target(position as f64);
+                if !hook_keys {
+                    let cur_left = (GetAsyncKeyState(VK_LEFT.0 as i32) as u16 & 0x8000) != 0;
+                    let cur_right = (GetAsyncKeyState(VK_RIGHT.0 as i32) as u16 & 0x8000) != 0;
+                    if cur_left && !prev_left {
+                        step -= 1;
+                    }
+                    if cur_right && !prev_right {
+                        step += 1;
+                    }
+                    prev_left = cur_left;
+                    prev_right = cur_right;
                 }
-                if cur_right && !prev_right {
-                    let (idx, position) = move_within(&candidates, selected, 1);
-                    selected = idx;
-                    spring.set_target(position as f64);
-                }
-                prev_left = cur_left;
-                prev_right = cur_right;
+            }
 
-                // Middle-click to close window
-                if (GetAsyncKeyState(VK_MBUTTON.0 as i32) as u16 & 0x8000) != 0 {
-                    let mut pt = POINT::default();
-                    let _ = GetCursorPos(&mut pt);
-                    if let Some(hit) = layout.hit_test(pt.x as f32, pt.y as f32, windows, sw, sh) {
-                        let _ = PostMessageW(windows[hit].hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
-                        commit_selection = false;
-                        break;
+            // 4. Mouse: wheel, hover, middle-click close, left-click select.
+            let wheel_steps = take_wheel_steps();
+            step += wheel_steps;
+
+            let cursor = self.cursor_in_client();
+            let cursor_moved = cursor != hover_cursor;
+            if cursor_moved {
+                hover_cursor = cursor;
+                if let Some(hit) = layout.hit_test(cursor.0, cursor.1, &windows, sw, sh) {
+                    if hit != selected {
+                        if let Some(pos) = candidates.iter().position(|&i| i == hit) {
+                            jump_to = Some(pos);
+                        }
                     }
                 }
+            }
 
-                // Left-click to select window, or click outside to dismiss
+            unsafe {
+                let mbutton = (GetAsyncKeyState(VK_MBUTTON.0 as i32) as u16 & 0x8000) != 0;
+                if mbutton && !prev_mbutton {
+                    if let Some(hit) = layout.hit_test(cursor.0, cursor.1, &windows, sw, sh) {
+                        close_request = Some(hit);
+                    }
+                }
+                prev_mbutton = mbutton;
+
                 if (GetAsyncKeyState(1) as u16 & 0x8000) != 0 {
-                    let mut pt = POINT::default();
-                    let _ = GetCursorPos(&mut pt);
-                    if let Some(hit) = layout.hit_test(pt.x as f32, pt.y as f32, windows, sw, sh) {
+                    if let Some(hit) = layout.hit_test(cursor.0, cursor.1, &windows, sw, sh) {
                         selected = hit;
                         commit_selection = true;
                         break;
@@ -770,24 +824,95 @@ impl OverlayWindow {
                 }
             }
 
-            // 3. Update physics & layout
+            // 5. Apply navigation
+            if !candidates.is_empty() {
+                if let Some(pos) = jump_to {
+                    let pos = pos.min(candidates.len() - 1);
+                    selected = candidates[pos];
+                    spring.set_target(pos as f64);
+                }
+                if step != 0 {
+                    let (idx, position) = move_within(&candidates, selected, step);
+                    selected = idx;
+                    spring.set_target(position as f64);
+                }
+            }
+
+            // 6. Close a window: post WM_CLOSE and remove its card, keeping
+            // the picker open (like the Windows switcher).
+            if let Some(idx) = close_request.filter(|&i| i < windows.len()) {
+                unsafe {
+                    let _ = PostMessageW(windows[idx].hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+                windows.remove(idx);
+                bitmaps.remove(idx);
+                icons.remove(idx);
+                raw_images.remove(idx);
+                if windows.is_empty() {
+                    commit_selection = false;
+                    break;
+                }
+                if selected > idx || selected >= windows.len() {
+                    selected = selected.saturating_sub(1);
+                }
+                candidates = layout.visible_indices(&windows);
+                if candidates.is_empty() {
+                    // e.g. the search filter now matches nothing; keep the picker open.
+                    spring.set_target(0.0);
+                } else {
+                    let pos = candidates
+                        .iter()
+                        .position(|&i| i >= selected)
+                        .unwrap_or(candidates.len() - 1);
+                    selected = candidates[pos];
+                    spring.set_target(pos as f64);
+                }
+                last_activity = Instant::now();
+            }
+
+            // Idle watchdog: guards against a picker stranded by a missed
+            // key-up or a touchpad that stopped reporting. It only counts
+            // time with no navigation, typing or mouse movement, so browsing
+            // or searching is never cut off. Preview mode was opened
+            // deliberately and is always dismissable, so it has no timeout.
+            if spring.target != last_target
+                || cursor_moved
+                || wheel_steps != 0
+                || search_query.len() != last_query_len
+            {
+                last_target = spring.target;
+                last_query_len = search_query.len();
+                last_activity = Instant::now();
+            }
+            if mode != PickerMode::Preview && last_activity.elapsed() > PICKER_IDLE_TIMEOUT {
+                commit_selection = false;
+                break;
+            }
+
+            // 7. Update physics & layout
             spring.update(dt);
+            if reduce_motion {
+                spring.snap_to(spring.target);
+            }
             if ((mode == PickerMode::Touchpad && fnav_armed) || mode == PickerMode::AltTab)
                 && !candidates.is_empty()
             {
-                let position = (spring.value.round() as usize).min(candidates.len() - 1);
+                let position = (spring.value.round().max(0.0) as usize).min(candidates.len() - 1);
                 selected = candidates[position];
             }
 
             layout.update(spring.value as f32, selected);
 
-            // 4. Render 120Hz/144Hz frame with smooth fade-in
-            let alpha = (show_start.elapsed().as_secs_f32() / fade_dur).min(1.0);
+            // 8. Render frame with smooth fade-in
+            let alpha = if fade_dur > 0.0 {
+                (show_start.elapsed().as_secs_f32() / fade_dur).min(1.0)
+            } else {
+                1.0
+            };
             let eased_alpha = 1.0 - (1.0 - alpha).powi(3);
 
             self.d2d.begin_draw();
 
-            // Draw blurred desktop frosted glass backdrop
             if let Some(ref bg) = bg_bmp {
                 self.d2d.draw_bitmap(
                     bg,
@@ -804,7 +929,7 @@ impl OverlayWindow {
             }
 
             // Top Pill Badge (Refined Liquid Glass Capsule)
-            let pill_w = (hint_text.len() as f32 * 6.8 + 32.0).clamp(260.0, 520.0);
+            let pill_w = (hint_text.len() as f32 * 6.8 + 32.0).clamp(260.0, 600.0);
             let pill_rect = D2D_RECT_F {
                 left: (sw - pill_w) * 0.5,
                 top: 14.0,
@@ -826,22 +951,64 @@ impl OverlayWindow {
                 true,
             );
 
-            // Active layout
-            layout.render(&self.d2d, windows, &bitmaps, &icons, accent, sw, sh);
+            layout.render(&self.d2d, &windows, &bitmaps, &icons, accent, sw, sh);
 
             let _ = self.d2d.end_draw();
 
-            thread::sleep(Duration::from_millis(7)); // 140Hz timing sync
+            thread::sleep(Duration::from_millis(7));
         }
 
-        picker_active.store(false, std::sync::atomic::Ordering::SeqCst);
         self.hide();
-        if commit_selection {
-            let curr_img = raw_images.get(0).cloned().flatten();
-            let next_img = raw_images.get(selected).cloned().flatten();
-            Some((selected, curr_img, next_img))
+        if !commit_selection || selected >= windows.len() {
+            return None;
+        }
+        // Map back to the caller's list; frames are only reusable if the
+        // current window (index 0) is still the first card.
+        let target_hwnd = windows[selected].hwnd;
+        let original_idx = original.iter().position(|w| w.hwnd == target_hwnd)?;
+        let curr_img = if windows[0].hwnd == original[0].hwnd {
+            raw_images.first().cloned().flatten()
         } else {
             None
-        }
+        };
+        let next_img = raw_images.get(selected).cloned().flatten();
+        Some((original_idx, curr_img, next_img))
     }
+}
+
+/// Clears the "picker active" flag on every exit path so the thumbnail
+/// refresh thread always stops.
+struct StopFlagGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Drop for StopFlagGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct PickerKeysGuard;
+impl Drop for PickerKeysGuard {
+    fn drop(&mut self) {
+        crate::input::keyboard_hook::set_picker_mode(false);
+    }
+}
+
+/// Mouse-wheel delta accumulated by the overlay window procedure.
+static WHEEL_ACCUM: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Whole wheel notches since the last call (+1 = scroll down = next card).
+/// Partial deltas from smooth-scrolling touchpads are carried over.
+fn take_wheel_steps() -> i32 {
+    use std::sync::atomic::Ordering;
+    let acc = WHEEL_ACCUM.load(Ordering::SeqCst);
+    let notches = acc / 120;
+    if notches != 0 {
+        WHEEL_ACCUM.fetch_sub(notches * 120, Ordering::SeqCst);
+    }
+    -notches
+}
+
+fn has_visible_content(img: &ImageBuffer) -> bool {
+    img.pixels
+        .chunks_exact(16)
+        .any(|px| px[0] > 15 || px[1] > 15 || px[2] > 15)
 }

@@ -20,6 +20,7 @@ use window::{
     bring_to_front, capture::ImageBuffer, capture_window_image, enumerator::WindowInfo,
     get_open_windows, nudge_cursor, sort_by_mru, start_mru_watcher,
 };
+use window::enumerator::app_identity;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, WPARAM,
@@ -35,8 +36,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_MENU,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DisableProcessWindowsGhosting, DispatchMessageW, GetMessageW, PeekMessageW, PostMessageW,
-    PostQuitMessage, TranslateMessage, MSG, PM_REMOVE,
+    DisableProcessWindowsGhosting, DispatchMessageW, GetMessageW, IsWindow, MessageBoxW,
+    PeekMessageW, PostMessageW, PostQuitMessage, TranslateMessage, MB_ICONERROR, MB_OK, MSG,
+    PM_REMOVE,
 };
 
 static IS_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -113,6 +115,14 @@ fn commit_window_switch(
     let curr_hwnd = mru[0].hwnd;
     let target_hwnd = mru[sel].hwnd;
 
+    // Skip the transition when Windows animations are off, or when the
+    // current window was closed from the picker (nothing to animate from).
+    if !animations::system_animations_enabled() || !unsafe { IsWindow(curr_hwnd) }.as_bool() {
+        bring_to_front(target_hwnd);
+        nudge_cursor();
+        return;
+    }
+
     let curr_img = opt_curr_img.or_else(|| capture_window_image(curr_hwnd));
     let next_img = opt_next_img.or_else(|| capture_window_image(target_hwnd));
 
@@ -122,6 +132,112 @@ fn commit_window_switch(
     } else {
         bring_to_front(target_hwnd);
         nudge_cursor();
+    }
+}
+
+/// Alt+Tab (or Alt+` with `same_app`): switch immediately on a quick tap,
+/// otherwise open the picker until the modifier is released.
+unsafe fn handle_alt_tab(
+    overlay: &OverlayWindow,
+    settings: &parking_lot::RwLock<Settings>,
+    event_rx: &crossbeam_channel::Receiver<AppEvent>,
+    direction: i32,
+    same_app: bool,
+) {
+    let (blocklist, layout_name, accent_rgb, use_ctrl, sensitivity, dock_mag) = {
+        let cfg = settings.read();
+        (
+            cfg.blocklist.clone(),
+            cfg.layout.clone(),
+            cfg.accent,
+            cfg.hotkey_mod.eq_ignore_ascii_case("ctrl"),
+            cfg.sensitivity as f32,
+            cfg.dock_mag as f32,
+        )
+    };
+    let mut mru = sort_by_mru(get_open_windows(&blocklist, false));
+    if same_app {
+        // Keep only windows of the foreground window's app, still in MRU order.
+        let Some(app) = mru.first().and_then(|w| app_identity(w.hwnd)) else {
+            return;
+        };
+        mru.retain(|w| app_identity(w.hwnd).as_deref() == Some(app.as_str()));
+    }
+    if mru.len() < 2 {
+        return;
+    }
+    let start_idx = if direction > 0 { 1 } else { mru.len() - 1 };
+
+    // Quick tap (<100ms, matching native Windows behaviour): switch
+    // immediately without flashing the picker.
+    let mod_vk = if use_ctrl { VK_CONTROL } else { VK_MENU };
+    let mut quick_tap = false;
+    let wait_start = std::time::Instant::now();
+    while wait_start.elapsed() < std::time::Duration::from_millis(100) {
+        let is_mod_down = (GetAsyncKeyState(mod_vk.0 as i32) as u16 & 0x8000) != 0;
+        if !is_mod_down {
+            quick_tap = true;
+            break;
+        }
+        let mut pmsg = MSG::default();
+        while PeekMessageW(&mut pmsg, None, 0, 0, PM_REMOVE).as_bool() {
+            if pmsg.message == WM_APP_EVENT {
+                while let Ok(ev) = event_rx.try_recv() {
+                    if matches!(ev, AppEvent::AltTabRelease) {
+                        quick_tap = true;
+                        break;
+                    }
+                }
+            }
+            let _ = TranslateMessage(&pmsg);
+            DispatchMessageW(&pmsg);
+        }
+        if quick_tap {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(4));
+    }
+
+    if quick_tap {
+        commit_window_switch(overlay, settings, &mru, start_idx, None, None);
+        return;
+    }
+
+    if let Some((sel, c_img, n_img)) = overlay.run_picker(
+        &mru,
+        start_idx,
+        &layout_name,
+        accent_color(accent_rgb),
+        PickerMode::AltTab,
+        use_ctrl,
+        sensitivity,
+        dock_mag,
+        event_rx,
+    ) {
+        commit_window_switch(overlay, settings, &mru, sel, c_img, n_img);
+    }
+}
+
+fn accent_color(rgb: [u8; 3]) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: rgb[0] as f32 / 255.0,
+        g: rgb[1] as f32 / 255.0,
+        b: rgb[2] as f32 / 255.0,
+        a: 1.0,
+    }
+}
+
+/// Fatal startup errors: release builds have no console, so show a dialog.
+fn fatal_error(message: &str) {
+    eprintln!("[fatal] {message}");
+    let text: Vec<u16> = format!("{message}\0").encode_utf16().collect();
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            w!("AppSwitcher"),
+            MB_OK | MB_ICONERROR,
+        );
     }
 }
 
@@ -165,7 +281,8 @@ fn main() {
     println!("  Press Ctrl+C in console to stop                         ");
     println!("==========================================================");
 
-    if check_python_instance() {
+    let python_running = check_python_instance();
+    if python_running {
         println!("[warning] An instance of Python AppSwitcher was detected running.");
         println!("          Close it from System Tray or Task Manager to ensure full control of gestures/Alt+Tab.");
     }
@@ -184,7 +301,9 @@ fn main() {
     let overlay = match OverlayWindow::new() {
         Ok(ov) => Arc::new(ov),
         Err(e) => {
-            eprintln!("[fatal] Direct2D overlay initialization failed: {:?}", e);
+            fatal_error(&format!(
+                "Could not start the Direct2D overlay, so AppSwitcher has to close.\n\n{e:?}"
+            ));
             return;
         }
     };
@@ -196,13 +315,22 @@ fn main() {
     ) {
         Ok(dlg) => dlg,
         Err(e) => {
-            eprintln!("[fatal] Settings dialog initialization failed: {:?}", e);
+            fatal_error(&format!(
+                "Could not create the Settings window, so AppSwitcher has to close.\n\n{e:?}"
+            ));
             return;
         }
     };
 
     // 7. Initialize System Tray on Main UI Thread
     let _tray = TrayIcon::new(event_tx.clone(), overlay.hwnd).ok();
+    if python_running {
+        ui::tray::notify(
+            "Python AppSwitcher is also running",
+            "Close it from its tray icon so gestures and Alt+Tab aren't handled twice.",
+            true,
+        );
+    }
 
     // 8. Watch for "Show Settings" event from secondary launches
     let tx_sig = event_tx.clone();
@@ -265,81 +393,10 @@ fn main() {
                 while let Ok(event) = event_rx.try_recv() {
                     match event {
                         AppEvent::AltTab { direction } => {
-                            let (blocklist, layout_name, accent_rgb, use_ctrl, sensitivity, dock_mag) = {
-                                let cfg = settings.read();
-                                (
-                                    cfg.blocklist.clone(),
-                                    cfg.layout.clone(),
-                                    cfg.accent,
-                                    cfg.hotkey_mod.eq_ignore_ascii_case("ctrl"),
-                                    cfg.sensitivity as f32,
-                                    cfg.dock_mag as f32,
-                                )
-                            };
-                            let mru = sort_by_mru(get_open_windows(&blocklist, false));
-                            if mru.len() >= 2 {
-                                let start_idx = if direction > 0 { 1 } else { mru.len() - 1 };
-
-                                // Quick Alt+Tab detection (matches Python / Windows native behavior):
-                                // If user quickly taps Alt+Tab (<100ms), switch immediately without opening or flashing the picker!
-                                let mod_vk = if use_ctrl { VK_CONTROL } else { VK_MENU };
-                                let mut quick_tap = false;
-                                let wait_start = std::time::Instant::now();
-                                while wait_start.elapsed() < std::time::Duration::from_millis(100) {
-                                    let is_mod_down =
-                                        (GetAsyncKeyState(mod_vk.0 as i32) as u16 & 0x8000) != 0;
-                                    if !is_mod_down {
-                                        quick_tap = true;
-                                        break;
-                                    }
-                                    let mut pmsg = MSG::default();
-                                    while PeekMessageW(&mut pmsg, None, 0, 0, PM_REMOVE).as_bool() {
-                                        if pmsg.message == WM_APP_EVENT {
-                                            while let Ok(ev) = event_rx.try_recv() {
-                                                if matches!(ev, AppEvent::AltTabRelease) {
-                                                    quick_tap = true;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        let _ = TranslateMessage(&pmsg);
-                                        DispatchMessageW(&pmsg);
-                                    }
-                                    if quick_tap {
-                                        break;
-                                    }
-                                    thread::sleep(std::time::Duration::from_millis(4));
-                                }
-
-                                if quick_tap {
-                                    commit_window_switch(
-                                        &overlay, &settings, &mru, start_idx, None, None,
-                                    );
-                                    continue;
-                                }
-
-                                let accent = D2D1_COLOR_F {
-                                    r: accent_rgb[0] as f32 / 255.0,
-                                    g: accent_rgb[1] as f32 / 255.0,
-                                    b: accent_rgb[2] as f32 / 255.0,
-                                    a: 1.0,
-                                };
-                                if let Some((sel, c_img, n_img)) = overlay.run_picker(
-                                    &mru,
-                                    start_idx,
-                                    &layout_name,
-                                    accent,
-                                    PickerMode::AltTab,
-                                    use_ctrl,
-                                    sensitivity,
-                                    dock_mag,
-                                    &event_rx,
-                                ) {
-                                    commit_window_switch(
-                                        &overlay, &settings, &mru, sel, c_img, n_img,
-                                    );
-                                }
-                            }
+                            handle_alt_tab(&overlay, &settings, &event_rx, direction, false);
+                        }
+                        AppEvent::AltTabSameApp { direction } => {
+                            handle_alt_tab(&overlay, &settings, &event_rx, direction, true);
                         }
                         AppEvent::PreviewPicker => {
                             let (blocklist, layout_name, accent_rgb, use_ctrl, sensitivity, dock_mag) = {
@@ -355,12 +412,7 @@ fn main() {
                             };
                             let mru = sort_by_mru(get_open_windows(&blocklist, false));
                             if mru.len() >= 2 {
-                                let accent = D2D1_COLOR_F {
-                                    r: accent_rgb[0] as f32 / 255.0,
-                                    g: accent_rgb[1] as f32 / 255.0,
-                                    b: accent_rgb[2] as f32 / 255.0,
-                                    a: 1.0,
-                                };
+                                let accent = accent_color(accent_rgb);
                                 if let Some((sel, c_img, n_img)) = overlay.run_picker(
                                     &mru,
                                     0,
@@ -419,12 +471,7 @@ fn main() {
                             };
                             let mru = sort_by_mru(get_open_windows(&blocklist, false));
                             if mru.len() >= 2 {
-                                let accent = D2D1_COLOR_F {
-                                    r: accent_rgb[0] as f32 / 255.0,
-                                    g: accent_rgb[1] as f32 / 255.0,
-                                    b: accent_rgb[2] as f32 / 255.0,
-                                    a: 1.0,
-                                };
+                                let accent = accent_color(accent_rgb);
                                 if let Some((sel, c_img, n_img)) = overlay.run_picker(
                                     &mru,
                                     0,
@@ -472,6 +519,12 @@ fn main() {
                             let target_idx = if direction > 0 { 1 } else { mru.len() - 1 };
                             let curr_hwnd = mru[0].hwnd;
                             let target_hwnd = mru[target_idx].hwnd;
+
+                            if !animations::system_animations_enabled() {
+                                bring_to_front(target_hwnd);
+                                nudge_cursor();
+                                continue;
+                            }
 
                             let curr_img = capture_window_image(curr_hwnd);
                             let next_img = capture_window_image(target_hwnd);

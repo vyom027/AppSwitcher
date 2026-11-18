@@ -302,3 +302,26 @@ fn render_3d_rot_panel(
         }
     }
 }
+
+/// False when the user turned off "Animation effects" in Windows settings
+/// (SPI_GETCLIENTAREAANIMATION); transitions and picker motion then snap.
+pub fn system_animations_enabled() -> bool {
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    };
+    let mut enabled = BOOL(1);
+    unsafe {
+        if SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some(&mut enabled as *mut BOOL as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+        .is_err()
+        {
+            return true;
+        }
+    }
+    enabled.as_bool()
+}

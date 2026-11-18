@@ -154,6 +154,9 @@ unsafe fn handle_raw_input(h_raw_input: HRAWINPUT) {
         timestamp: now,
     };
 
+    if crate::input::is_paused() {
+        return;
+    }
     if let Some(ref mut tracker) = *TRACKER.lock() {
         tracker.feed(&snapshot);
     }
@@ -239,6 +242,11 @@ pub fn run_input_thread(
             trigger_vk,
         ) {
             eprintln!("[warn] Failed to install keyboard hook: {:?}", e);
+            crate::ui::tray::notify(
+                "Alt+Tab shortcut unavailable",
+                "AppSwitcher couldn't install its keyboard hook, so Alt+Tab opens the Windows switcher. Gestures still work.",
+                true,
+            );
         } else {
             println!("[input] Low-level keyboard hook active (Alt+Tab interception enabled)");
         }
@@ -282,6 +290,11 @@ pub fn run_input_thread(
             eprintln!(
                 "[warn] Precision Touchpad RawInput registration failed: {:?}",
                 e
+            );
+            crate::ui::tray::notify(
+                "Touchpad gestures unavailable",
+                "AppSwitcher couldn't listen to the precision touchpad. Alt+Tab still works.",
+                true,
             );
         } else {
             println!("[input] Precision Touchpad RawInput listener active (RIDEV_INPUTSINK)");

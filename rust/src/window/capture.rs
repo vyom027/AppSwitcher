@@ -5,16 +5,16 @@ use std::mem::size_of;
 use std::sync::LazyLock;
 use std::thread;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{BOOL, HWND, RECT};
+use windows::Win32::Foundation::{BOOL, HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
     ReleaseDC, SelectObject, SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DIB_RGB_COLORS, HALFTONE, HDC, SRCCOPY,
+    DIB_RGB_COLORS, HALFTONE, HDC, SRCCOPY, GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow,
+    HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetDesktopWindow, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, IsIconic, IsWindowVisible, IsZoomed, SystemParametersInfoW, SM_CXSCREEN,
-    SM_CYSCREEN, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    GetCursorPos, GetDesktopWindow, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, IsIconic, IsWindowVisible, IsZoomed, SM_CXSCREEN, SM_CYSCREEN,
 };
 
 #[link(name = "user32")]
@@ -29,96 +29,121 @@ pub struct ImageBuffer {
     pub pixels: Vec<u8>, // RGBA format
 }
 
-pub fn screen_size() -> (i32, i32) {
-    unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
+/// Work area (x, y, w, h) of the monitor under the mouse cursor. The picker
+/// opens here, so on multi-monitor setups it follows the user's attention.
+pub fn work_area() -> (i32, i32, i32, i32) {
+    unsafe {
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        monitor_work_area(MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY))
+    }
 }
 
-pub fn work_area() -> (i32, i32, i32, i32) {
-    let (sw, sh) = screen_size();
-    let mut wx = 0;
-    let mut wy = 0;
-    let mut ww = sw;
-    let mut wh = sh;
+/// Work area of the monitor that holds most of `hwnd`.
+pub fn window_work_area(hwnd: HWND) -> (i32, i32, i32, i32) {
+    unsafe { monitor_work_area(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)) }
+}
 
+/// Full bounds of the monitor that holds most of `hwnd`.
+pub fn window_monitor_rect(hwnd: HWND) -> Option<RECT> {
     unsafe {
-        let mut rect = RECT::default();
-        if SystemParametersInfoW(
-            SPI_GETWORKAREA,
-            0,
-            Some(&mut rect as *mut _ as *mut _),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        )
-        .is_ok()
-        {
-            let w = rect.right - rect.left;
-            let h = rect.bottom - rect.top;
-            if w > 0 && h > 0 {
-                wx = rect.left;
-                wy = rect.top;
-                ww = w;
-                wh = h;
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info)
+            .as_bool()
+            .then_some(info.rcMonitor)
+    }
+}
+
+struct TopBarSearch {
+    monitor: RECT,
+    height: i32,
+}
+
+/// Work area of a monitor, also excluding top bars (YASB, Zebar, GlazeWM,
+/// RetroBar, ...) that don't reserve space via the AppBar API.
+fn monitor_work_area(hmon: HMONITOR) -> (i32, i32, i32, i32) {
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        if !GetMonitorInfoW(hmon, &mut info).as_bool() {
+            let w = GetSystemMetrics(SM_CXSCREEN);
+            let h = GetSystemMetrics(SM_CYSCREEN);
+            return (0, 0, w, h);
+        }
+    }
+    let mon = info.rcMonitor;
+    let work = info.rcWork;
+    let (wx, mut wy, ww, mut wh) = (
+        work.left,
+        work.top,
+        work.right - work.left,
+        work.bottom - work.top,
+    );
+
+    // If the work area doesn't already reserve a top bar, look for a visible
+    // window docked to this monitor's top edge.
+    if wy == mon.top {
+        unsafe extern "system" fn enum_top_bar_proc(
+            hwnd: HWND,
+            lparam: windows::Win32::Foundation::LPARAM,
+        ) -> BOOL {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetWindowLongW, GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            };
+
+            if !IsWindowVisible(hwnd).as_bool() || is_own_window(hwnd) {
+                return BOOL(1);
             }
+            let search = &mut *(lparam.0 as *mut TopBarSearch);
+            let m = search.monitor;
+            let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            let mut wr = RECT::default();
+            if GetWindowRect(hwnd, &mut wr).is_ok() {
+                let w = wr.right - wr.left;
+                let h = wr.bottom - wr.top;
+                let mw = m.right - m.left;
+                // Docked to the top edge, spans >= 75% of the width, 16-120px tall.
+                if wr.top == m.top
+                    && wr.left <= m.left + 4
+                    && w >= (mw * 3 / 4)
+                    && (16..=120).contains(&h)
+                    && ((ex_style & (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0)) != 0 || h > 20)
+                    && h > search.height
+                {
+                    search.height = h;
+                }
+            }
+            BOOL(1)
         }
 
-        // Dynamic Top-Bar Detection (YASB, Zebar, GlazeWM, RetroBar, etc.):
-        // If SPI_GETWORKAREA did not report a top bar (e.g. YASB with windows_app_bar: false or floating),
-        // inspect visible top-level windows to auto-detect any top bar docked to screen top.
-        if wy == 0 {
-            let mut detected_top_bar_h: i32 = 0;
-
-            unsafe extern "system" fn enum_top_bar_proc(
-                hwnd: HWND,
-                lparam: windows::Win32::Foundation::LPARAM,
-            ) -> BOOL {
-                use windows::Win32::UI::WindowsAndMessaging::{
-                    GetWindowLongW, GetWindowRect, IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
-                    WS_EX_TOPMOST,
-                };
-
-                if !IsWindowVisible(hwnd).as_bool() || is_own_window(hwnd) {
-                    return BOOL(1);
-                }
-
-                let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-                let mut wr = RECT::default();
-                if GetWindowRect(hwnd, &mut wr).is_ok() {
-                    let w = wr.right - wr.left;
-                    let h = wr.bottom - wr.top;
-                    let (sw, _) = screen_size();
-
-                    // Check if window is docked to top edge:
-                    // top == 0, spans most of monitor width (>= 75%), and height between 16px and 120px
-                    if wr.top == 0 && wr.left <= 4 && w >= (sw * 3 / 4) && h >= 16 && h <= 120 {
-                        // Priority to topmost or toolwindow
-                        if (ex_style & (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0)) != 0 || h > 20 {
-                            let out_h = lparam.0 as *mut i32;
-                            if !out_h.is_null() && h > *out_h {
-                                *out_h = h;
-                            }
-                        }
-                    }
-                }
-                BOOL(1)
-            }
-
+        let mut search = TopBarSearch {
+            monitor: mon,
+            height: 0,
+        };
+        unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::EnumWindows(
                 Some(enum_top_bar_proc),
-                windows::Win32::Foundation::LPARAM(&mut detected_top_bar_h as *mut i32 as isize),
+                windows::Win32::Foundation::LPARAM(&mut search as *mut TopBarSearch as isize),
             );
-
-            if detected_top_bar_h > 0 {
-                wy = detected_top_bar_h;
-                wh = (sh - wy).max(100);
-            }
+        }
+        if search.height > 0 {
+            wy = mon.top + search.height;
+            wh = (work.bottom - wy).max(100);
         }
     }
 
-    (wx, wy, ww, wh)
+    (wx, wy, ww.max(1), wh.max(1))
 }
 
 // ─── Frosted Glass Backdrop Generator & Cache ────────────────────────────────
 
-static BACKDROP_CACHE: LazyLock<Mutex<Option<(Instant, ImageBuffer)>>> =
+type Area = (i32, i32, i32, i32);
+static BACKDROP_CACHE: LazyLock<Mutex<Option<(Instant, Area, ImageBuffer)>>> =
     LazyLock::new(|| Mutex::new(None));
 static IS_PREWARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 const BACKDROP_TTL: Duration = Duration::from_millis(1500);
@@ -128,28 +153,30 @@ pub fn prewarm_backdrop() {
         return;
     }
     thread::spawn(|| {
-        let (wx, wy, ww, wh) = work_area();
+        let area = work_area();
+        let (wx, wy, ww, wh) = area;
         if ww > 0 && wh > 0 {
             let bg = capture_frosted_backdrop(wx, wy, ww, wh);
-            *BACKDROP_CACHE.lock() = Some((Instant::now(), bg));
+            *BACKDROP_CACHE.lock() = Some((Instant::now(), area, bg));
         }
         IS_PREWARMING.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 }
 
-pub fn get_backdrop() -> ImageBuffer {
+/// Blurred backdrop of `area`, reusing a recent capture of the same area.
+pub fn get_backdrop(area: Area) -> ImageBuffer {
     let now = Instant::now();
     {
         let cache = BACKDROP_CACHE.lock();
-        if let Some((ts, ref img)) = *cache {
-            if now.duration_since(ts) < BACKDROP_TTL {
+        if let Some((ts, cached_area, ref img)) = *cache {
+            if cached_area == area && now.duration_since(ts) < BACKDROP_TTL {
                 return img.clone();
             }
         }
     }
-    let (wx, wy, ww, wh) = work_area();
+    let (wx, wy, ww, wh) = area;
     let bg = capture_frosted_backdrop(wx, wy, ww, wh);
-    *BACKDROP_CACHE.lock() = Some((now, bg.clone()));
+    *BACKDROP_CACHE.lock() = Some((now, area, bg.clone()));
     bg
 }
 
@@ -576,7 +603,7 @@ pub fn capture_window_image_timed(hwnd: HWND, timeout: Duration) -> Option<Image
     let ov_vis = OVERLAY_VISIBLE.load(std::sync::atomic::Ordering::Relaxed);
     let is_fg = unsafe { GetForegroundWindow() == hwnd && !IsIconic(hwnd).as_bool() };
     if is_fg && !ov_vis {
-        let (wx, wy, ww, wh) = work_area();
+        let (wx, wy, ww, wh) = window_work_area(hwnd);
         if let Some(buf) = grab_screen_rect(wx, wy, ww, wh) {
             cache_frame(raw, now, buf.clone());
             return Some(buf);
@@ -630,7 +657,9 @@ pub fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
         return Some(create_placeholder("AppSwitcher", 480, 300));
     }
 
-    let (wx, wy, ww, wh) = work_area();
+    // Compose each window against its own monitor's work area so windows
+    // on secondary monitors don't come out as empty canvases.
+    let (wx, wy, ww, wh) = window_work_area(hwnd);
     if ww <= 0 || wh <= 0 {
         return Some(create_placeholder("", 480, 300));
     }

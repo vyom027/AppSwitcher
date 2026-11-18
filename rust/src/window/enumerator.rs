@@ -2,7 +2,13 @@ use std::mem::size_of;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
-use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::core::PWSTR;
+use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::System::Threading::{
+    GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows::Win32::UI::WindowsAndMessaging::EnumChildWindows;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetLastActivePopup, GetWindowLongW, GetWindowTextLengthW,
     GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, GA_ROOTOWNER, GWL_EXSTYLE,
@@ -135,4 +141,62 @@ pub fn get_open_windows(blocklist: &[String], force_refresh: bool) -> Vec<Window
         .into_iter()
         .filter(|w| !blocklist.contains(&w.title))
         .collect()
+}
+
+fn pid_of(hwnd: HWND) -> u32 {
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    pid
+}
+
+fn image_path(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut size = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        )
+        .is_ok();
+        let _ = CloseHandle(process);
+        ok.then(|| String::from_utf16_lossy(&buf[..size as usize]).to_lowercase())
+    }
+}
+
+/// Lower-cased path of the executable that owns `hwnd`. UWP windows are
+/// hosted by ApplicationFrameHost.exe, so for those the hosted app's process
+/// (the child CoreWindow's owner) is used instead.
+pub fn app_identity(hwnd: HWND) -> Option<String> {
+    let host_pid = pid_of(hwnd);
+    let path = image_path(host_pid)?;
+    if !path.ends_with("\\applicationframehost.exe") {
+        return Some(path);
+    }
+
+    struct Search {
+        host_pid: u32,
+        found: u32,
+    }
+    unsafe extern "system" fn child_proc(child: HWND, lparam: LPARAM) -> BOOL {
+        let search = &mut *(lparam.0 as *mut Search);
+        let pid = pid_of(child);
+        if pid != 0 && pid != search.host_pid {
+            search.found = pid;
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+    let mut search = Search { host_pid, found: 0 };
+    unsafe {
+        let _ = EnumChildWindows(hwnd, Some(child_proc), LPARAM(&mut search as *mut Search as isize));
+    }
+    image_path(search.found).or(Some(path))
 }
