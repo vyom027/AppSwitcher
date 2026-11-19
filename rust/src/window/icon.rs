@@ -239,6 +239,7 @@ fn hicon_to_image(hicon: HICON, target_w: u32, target_h: u32) -> Option<ImageBuf
                 width: target_w,
                 height: target_h,
                 pixels: raw_pixels,
+                content: None,
             })
         } else {
             None

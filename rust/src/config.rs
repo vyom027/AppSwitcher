@@ -64,7 +64,13 @@ impl Settings {
                         // settings file; point them at a supported layout.
                         if !matches!(
                             settings.layout.to_ascii_lowercase().as_str(),
-                            "dock" | "row" | "hero" | "expose_cloud" | "spotlight"
+                            "dock"
+                                | "row"
+                                | "hero"
+                                | "expose_cloud"
+                                | "spotlight"
+                                | "orbit"
+                                | "honeycomb"
                         ) {
                             settings.layout = "dock".to_string();
                         }

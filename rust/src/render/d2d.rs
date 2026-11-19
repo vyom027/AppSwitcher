@@ -5,11 +5,12 @@ use std::collections::HashMap;
 use windows::core::{w, Interface, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
-    D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
+    D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap, ID2D1Brush, ID2D1Factory, ID2D1HwndRenderTarget,
+    ID2D1PathGeometry, D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ELLIPSE,
     ID2D1RenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1_BITMAP_BRUSH_PROPERTIES, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
     D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2,
@@ -398,6 +399,108 @@ impl D2DContext {
         }
     }
 
+    /// Closed polygon (e.g. a hexagon) in absolute coordinates.
+    pub fn polygon(&self, points: &[(f32, f32)]) -> Option<ID2D1PathGeometry> {
+        if points.len() < 3 {
+            return None;
+        }
+        unsafe {
+            let geometry = self.factory.CreatePathGeometry().ok()?;
+            let sink = geometry.Open().ok()?;
+            sink.BeginFigure(
+                D2D_POINT_2F {
+                    x: points[0].0,
+                    y: points[0].1,
+                },
+                D2D1_FIGURE_BEGIN_FILLED,
+            );
+            let rest: Vec<D2D_POINT_2F> = points[1..]
+                .iter()
+                .map(|&(x, y)| D2D_POINT_2F { x, y })
+                .collect();
+            sink.AddLines(&rest);
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close().ok()?;
+            Some(geometry)
+        }
+    }
+
+    pub fn fill_geometry(&self, geometry: &ID2D1PathGeometry, color: D2D1_COLOR_F) {
+        unsafe {
+            self.brush.SetColor(&color);
+            self.rt.FillGeometry(geometry, &self.brush, None);
+        }
+    }
+
+    pub fn draw_geometry(&self, geometry: &ID2D1PathGeometry, color: D2D1_COLOR_F, width: f32) {
+        unsafe {
+            self.brush.SetColor(&color);
+            self.rt.DrawGeometry(geometry, &self.brush, width, None);
+        }
+    }
+
+    /// Brush that paints `bitmap` stretched over `dest` (absolute coords).
+    /// Create once per frame and reuse it for many shapes.
+    pub fn bitmap_brush(&self, bitmap: &ID2D1Bitmap, dest: D2D_RECT_F, opacity: f32) -> Option<ID2D1Brush> {
+        unsafe {
+            let size = bitmap.GetSize();
+            let w = dest.right - dest.left;
+            let h = dest.bottom - dest.top;
+            if size.width <= 0.0 || size.height <= 0.0 || w <= 0.0 || h <= 0.0 {
+                return None;
+            }
+            let props = D2D1_BITMAP_BRUSH_PROPERTIES {
+                extendModeX: D2D1_EXTEND_MODE_CLAMP,
+                extendModeY: D2D1_EXTEND_MODE_CLAMP,
+                interpolationMode: D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+            };
+            let brush = self.rt.CreateBitmapBrush(bitmap, Some(&props), None).ok()?;
+            brush.SetTransform(&windows::Foundation::Numerics::Matrix3x2 {
+                M11: w / size.width,
+                M12: 0.0,
+                M21: 0.0,
+                M22: h / size.height,
+                M31: dest.left,
+                M32: dest.top,
+            });
+            brush.SetOpacity(opacity);
+            brush.cast::<ID2D1Brush>().ok()
+        }
+    }
+
+    pub fn fill_geometry_with(&self, geometry: &ID2D1PathGeometry, brush: &ID2D1Brush) {
+        unsafe {
+            self.rt.FillGeometry(geometry, brush, None);
+        }
+    }
+
+    pub fn draw_ellipse(&self, cx: f32, cy: f32, rx: f32, ry: f32, color: D2D1_COLOR_F, width: f32) {
+        unsafe {
+            self.brush.SetColor(&color);
+            self.rt.DrawEllipse(
+                &D2D1_ELLIPSE {
+                    point: D2D_POINT_2F { x: cx, y: cy },
+                    radiusX: rx,
+                    radiusY: ry,
+                },
+                &self.brush,
+                width,
+                None,
+            );
+        }
+    }
+
+    /// Aliased rendering makes adjacent shapes tile without hairline seams.
+    pub fn set_aliased(&self, aliased: bool) {
+        unsafe {
+            self.rt.SetAntialiasMode(if aliased {
+                D2D1_ANTIALIAS_MODE_ALIASED
+            } else {
+                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE
+            });
+        }
+    }
+
     pub fn fill_circle(&self, cx: f32, cy: f32, radius: f32, color: D2D1_COLOR_F) {
         self.fill_rounded_rect(
             D2D_RECT_F {
@@ -589,4 +692,13 @@ fn pick_icon_family(dwrite: &IDWriteFactory) -> Vec<u16> {
         }
     }
     "Segoe MDL2 Assets\0".encode_utf16().collect()
+}
+
+/// Corners of a pointy-top hexagon with circumradius `r`, squeezed
+/// horizontally by `sx` (1.0 = regular; used for "turning over" effects).
+pub fn hexagon(cx: f32, cy: f32, r: f32, sx: f32) -> [(f32, f32); 6] {
+    std::array::from_fn(|k| {
+        let angle = (60.0 * k as f32 - 90.0).to_radians();
+        (cx + r * angle.cos() * sx, cy + r * angle.sin())
+    })
 }

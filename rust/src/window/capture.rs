@@ -27,6 +27,10 @@ pub struct ImageBuffer {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>, // RGBA format
+    /// Where the actual window sits inside the image (x, y, w, h), when the
+    /// image is a non-maximized window placed on a work-area-sized canvas.
+    /// `None` means the whole image is the window / screen.
+    pub content: Option<(i32, i32, i32, i32)>,
 }
 
 /// Work area (x, y, w, h) of the monitor under the mouse cursor. The picker
@@ -348,6 +352,7 @@ pub fn capture_frosted_backdrop(wx: i32, wy: i32, ww: i32, wh: i32) -> ImageBuff
                 width: bw,
                 height: bh,
                 pixels: raw_pixels,
+                content: None,
             };
         }
     }
@@ -364,6 +369,7 @@ pub fn capture_frosted_backdrop(wx: i32, wy: i32, ww: i32, wh: i32) -> ImageBuff
         width: bw,
         height: bh,
         pixels: fallback,
+        content: None,
     }
 }
 
@@ -441,6 +447,7 @@ pub fn create_placeholder(_title: &str, width: u32, height: u32) -> ImageBuffer 
         width,
         height,
         pixels,
+        content: None,
     }
 }
 
@@ -506,6 +513,7 @@ pub fn grab_screen_rect(x: i32, y: i32, w: i32, h: i32) -> Option<ImageBuffer> {
                 width: w as u32,
                 height: h as u32,
                 pixels: raw_pixels,
+                content: None,
             })
         } else {
             None
@@ -544,6 +552,7 @@ fn crop_inner(
         width: crop_w,
         height: crop_h,
         pixels: out,
+        content: None,
     }
 }
 
@@ -581,6 +590,14 @@ fn compose_over_backdrop(win: &ImageBuffer, dx: i32, dy: i32, ww: u32, wh: u32) 
         width: ww,
         height: wh,
         pixels: canvas,
+        content: {
+            // The part of the window that landed on the canvas.
+            let left = dx.max(0);
+            let top = dy.max(0);
+            let right = (dx + win_w).min(ww as i32);
+            let bottom = (dy + win_h).min(wh as i32);
+            (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
+        },
     }
 }
 
@@ -764,6 +781,7 @@ pub fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
                             width: w as u32,
                             height: h as u32,
                             pixels: raw_pixels,
+                            content: None,
                         };
 
                         if is_maximized {

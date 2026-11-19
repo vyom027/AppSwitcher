@@ -57,6 +57,8 @@ const ANIMATIONS: &[(&str, &str)] = &[
     ("flip", "Flip"),
     ("push", "Push"),
     ("stack", "Stack"),
+    ("orbit_throw", "Orbit Throw"),
+    ("hex_bloom", "Hex Bloom"),
 ];
 const LAYOUTS: &[(&str, &str)] = &[
     ("dock", "Dock"),
@@ -64,6 +66,8 @@ const LAYOUTS: &[(&str, &str)] = &[
     ("hero", "Hero"),
     ("expose_cloud", "Exposé Cloud"),
     ("spotlight", "Spotlight"),
+    ("orbit", "Orbit"),
+    ("honeycomb", "Honeycomb"),
 ];
 const HOTKEYS: &[(&str, u32)] = &[
     ("Tab", 0x09),
@@ -1067,7 +1071,8 @@ impl SettingsDialog {
     fn transition_stage(&self, stage: D2D_RECT_F, kind: &str, duration: f32) {
         let ac = self.accent();
         self.d2d.fill_rounded_rect(stage, 8.0, rgba(0.03, 0.03, 0.04, 1.0));
-        let duration = duration.max(0.08);
+        let duration =
+            duration.max(0.08) * crate::animations::TransitionKind::from_str(kind).duration_scale();
         let cycle = duration + 1.1;
         let elapsed = self.epoch.elapsed().as_secs_f32() % (cycle * 2.0);
         let (forward, local) = if elapsed < cycle { (true, elapsed) } else { (false, elapsed - cycle) };
@@ -1126,6 +1131,64 @@ impl SettingsDialog {
                 let half = w * 0.5 * (1.0 - e);
                 self.mini_window(rect(full.left, full.top, x0 + half, full.bottom), from, 1.0 - 0.3 * e);
                 self.mini_window(rect(full.right - half, full.top, full.right, full.bottom), from, 1.0 - 0.3 * e);
+            }
+            "orbit_throw" => {
+                use crate::animations::orbit_throw;
+                let h = full.bottom - full.top;
+                let (ocx, ocy, oa, ob) = orbit_throw::orbit(w, h);
+                let spin = (e * 1.25 - 0.12).clamp(0.0, 1.0);
+                let ring = 0.22 * (spin * (1.0 - spin) * 4.0).min(1.0);
+                if ring > 0.01 {
+                    self.d2d.draw_ellipse(x0 + ocx, full.top + ocy - ob, oa, ob, rgba(1.0, 1.0, 1.0, ring), 1.0);
+                }
+                let [old, new] = orbit_throw::cards(e, 1);
+                let mut order = [(from, old), (to, new)];
+                order.sort_by(|p, q| p.1 .0.cos().total_cmp(&q.1 .0.cos()));
+                for (tint, (theta, size)) in order {
+                    let (cx, cy, depth) = orbit_throw::orbit_point(theta, w, h);
+                    let scale = size * (0.62 + 0.38 * depth);
+                    let (cw, ch) = (w * scale, h * scale);
+                    let r = rect(x0 + cx - cw * 0.5, full.top + cy - ch * 0.5, x0 + cx + cw * 0.5, full.top + cy + ch * 0.5);
+                    self.mini_window(r, tint, 1.0);
+                    let dim = 0.55 * (1.0 - depth);
+                    if dim > 0.01 {
+                        self.d2d.fill_rounded_rect(r, 4.0, rgba(0.0, 0.0, 0.0, dim));
+                    }
+                }
+            }
+            "hex_bloom" => {
+                use crate::animations::hex_bloom;
+                use crate::render::d2d::hexagon;
+                let h = full.bottom - full.top;
+                if e >= 1.0 {
+                    self.mini_window(full, to, 1.0);
+                } else {
+                    self.mini_window(full, from, 1.0);
+                    let r = (h / 4.5).max(8.0);
+                    let origin = hex_bloom::origin(1, w, h);
+                    let max_dist = w.hypot(h * 0.5);
+                    for (cx, cy) in hex_bloom::cells(w, h, r) {
+                        let p = hex_bloom::cell_progress((cx, cy), origin, max_dist, e);
+                        let (x, y) = (x0 + cx, full.top + cy);
+                        if p <= 0.0 {
+                            continue;
+                        }
+                        if p >= 1.0 {
+                            if let Some(g) = self.d2d.polygon(&hexagon(x, y, r, 1.0)) {
+                                self.d2d.fill_geometry(&g, to);
+                            }
+                            continue;
+                        }
+                        if let Some(slot) = self.d2d.polygon(&hexagon(x, y, r, 1.0)) {
+                            self.d2d.fill_geometry(&slot, rgba(0.03, 0.03, 0.04, 1.0));
+                        }
+                        let (tint, sx) = if p < 0.5 { (from, 1.0 - 2.0 * p) } else { (to, 2.0 * p - 1.0) };
+                        if let Some(face) = self.d2d.polygon(&hexagon(x, y, r * 0.95, sx.max(0.02))) {
+                            self.d2d.fill_geometry(&face, tint);
+                            self.d2d.fill_geometry(&face, rgba(0.0, 0.0, 0.0, 0.5 * (1.0 - sx)));
+                        }
+                    }
+                }
             }
             _ => {
                 self.mini_window(shift(-w * e), from, 1.0);

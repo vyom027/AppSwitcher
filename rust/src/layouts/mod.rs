@@ -1,6 +1,8 @@
 pub mod dock;
 pub mod expose_cloud;
 pub mod hero;
+pub mod honeycomb;
+pub mod orbit;
 pub mod row;
 pub mod spotlight;
 
@@ -12,8 +14,14 @@ use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 pub trait PickerLayout {
     fn update(&mut self, focus: f32, selected: usize);
     fn set_query(&mut self, _query: &str) {}
+    /// Selectable windows, in the order Left/Right/Tab move through them.
     fn visible_indices(&self, windows: &[WindowInfo]) -> Vec<usize> {
         (0..windows.len()).collect()
+    }
+    /// Window that Up (`dir` = -1) or Down (+1) moves to from `selected`, for
+    /// layouts with rows. `None` falls back to stepping like Left/Right.
+    fn step_vertical(&self, _selected: usize, _dir: i32, _windows: &[WindowInfo]) -> Option<usize> {
+        None
     }
     fn render(
         &self,

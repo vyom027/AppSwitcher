@@ -1,5 +1,8 @@
 pub mod duo_fold;
+pub mod hex_bloom;
+pub mod orbit_throw;
 pub mod slide;
+pub mod windowed;
 
 pub use duo_fold::DuoFoldTransition;
 pub use slide::SlideTransition;
@@ -17,6 +20,8 @@ pub enum TransitionKind {
     Flip,
     Push,
     Stack,
+    OrbitThrow,
+    HexBloom,
 }
 
 impl TransitionKind {
@@ -29,7 +34,19 @@ impl TransitionKind {
             "flip" => Self::Flip,
             "push" => Self::Push,
             "stack" => Self::Stack,
+            "orbit throw" | "orbitthrow" => Self::OrbitThrow,
+            "hex bloom" | "hexbloom" => Self::HexBloom,
             _ => Self::Slide,
+        }
+    }
+
+    /// Multiplier on the user's animation duration. Orbit Throw and Hex
+    /// Bloom have far more motion than a slide, so they need longer to read.
+    pub fn duration_scale(&self) -> f32 {
+        match self {
+            Self::OrbitThrow => 2.6,
+            Self::HexBloom => 2.4,
+            _ => 1.0,
         }
     }
 
@@ -46,6 +63,8 @@ impl TransitionKind {
         match self {
             Self::Slide => SlideTransition::new(direction).render(d2d, curr, next, t, sw, sh),
             Self::DuoFold => DuoFoldTransition::new(direction).render(d2d, curr, next, t, sw, sh),
+            Self::OrbitThrow => orbit_throw::render(d2d, curr, next, t, direction, sw, sh),
+            Self::HexBloom => hex_bloom::render(d2d, curr, next, t, direction, sw, sh),
             Self::Fade => {
                 // Keep both frames fixed in place: this is a true dissolve,
                 // with no directional motion or scale that could read as Zoom.
@@ -55,25 +74,37 @@ impl TransitionKind {
                     right: sw,
                     bottom: sh,
                 };
-                d2d.draw_bitmap(curr, rect, (1.0 - t).max(0.0));
-                d2d.draw_bitmap(next, rect, t.min(1.0));
+                // A small drift in the swipe direction keeps it tied to
+                // your fingers without turning it into a slide.
+                let drift = direction.signum() as f32 * sw * 0.035;
+                let shift = |r: D2D_RECT_F, dx: f32| D2D_RECT_F {
+                    left: r.left + dx,
+                    right: r.right + dx,
+                    ..r
+                };
+                d2d.draw_bitmap(curr, shift(rect, drift * t), (1.0 - t).max(0.0));
+                d2d.draw_bitmap(next, shift(rect, -drift * (1.0 - t)), t.min(1.0));
             }
             Self::Zoom => {
                 // Move through the outgoing frame into a tighter incoming frame.
                 // The brief overlap keeps the transition continuous while the
                 // scale change makes this clearly different from a dissolve.
+                // The incoming frame grows out of the swipe side.
+                let dir = direction.signum() as f32;
                 let curr_s = 1.0 + 0.34 * t;
                 let next_s = 0.72 + 0.28 * t;
+                let curr_dx = dir * sw * 0.10 * t;
+                let next_dx = -dir * sw * 0.18 * (1.0 - t);
                 let c_rect = D2D_RECT_F {
-                    left: (sw - sw * curr_s) * 0.5,
+                    left: (sw - sw * curr_s) * 0.5 + curr_dx,
                     top: (sh - sh * curr_s) * 0.5,
-                    right: (sw + sw * curr_s) * 0.5,
+                    right: (sw + sw * curr_s) * 0.5 + curr_dx,
                     bottom: (sh + sh * curr_s) * 0.5,
                 };
                 let n_rect = D2D_RECT_F {
-                    left: (sw - sw * next_s) * 0.5,
+                    left: (sw - sw * next_s) * 0.5 + next_dx,
                     top: (sh - sh * next_s) * 0.5,
-                    right: (sw + sw * next_s) * 0.5,
+                    right: (sw + sw * next_s) * 0.5 + next_dx,
                     bottom: (sh + sh * next_s) * 0.5,
                 };
                 let curr_alpha = (1.0 - (t / 0.72)).clamp(0.0, 1.0);
@@ -149,21 +180,22 @@ impl TransitionKind {
                 };
                 d2d.draw_bitmap(curr, curr_rect, 1.0 - 0.35 * t);
 
-                // Next app rises up from bottom
+                // Next app rises up from below, arriving from the swipe side.
                 let next_y = (1.0 - t) * sh;
+                let next_x = -(direction.signum() as f32) * sw * 0.3 * (1.0 - t);
                 let next_rect = D2D_RECT_F {
-                    left: 0.0,
+                    left: next_x,
                     top: next_y,
-                    right: sw,
+                    right: next_x + sw,
                     bottom: next_y + sh,
                 };
 
                 // Ambient shadow above rising card
                 d2d.fill_rounded_rect(
                     D2D_RECT_F {
-                        left: 0.0,
+                        left: next_x,
                         top: next_y - 24.0,
-                        right: sw,
+                        right: next_x + sw,
                         bottom: next_y,
                     },
                     0.0,

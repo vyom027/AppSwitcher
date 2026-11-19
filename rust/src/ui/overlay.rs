@@ -319,6 +319,39 @@ impl OverlayWindow {
             }
         };
 
+        // A window that isn't maximized animates at its real size and position
+        // over the current screen, instead of as a full-screen frame. `src` is
+        // the window inside its capture; `dest` is where it sits on screen.
+        let windowed = next_img.content.and_then(|(x, y, w, h)| {
+            let image_area = next_img.width as f32 * next_img.height as f32;
+            if w <= 0 || h <= 0 || (w as f32 * h as f32) >= image_area * 0.9 {
+                return None;
+            }
+            let kx = sw / next_img.width as f32;
+            let ky = sh / next_img.height as f32;
+            let (x, y, w, h) = (x as f32, y as f32, w as f32, h as f32);
+            Some((
+                D2D_RECT_F {
+                    left: x,
+                    top: y,
+                    right: x + w,
+                    bottom: y + h,
+                },
+                D2D_RECT_F {
+                    left: x * kx,
+                    top: y * ky,
+                    right: (x + w) * kx,
+                    bottom: (y + h) * ky,
+                },
+            ))
+        });
+        let draw_transition = |t: f32| match windowed {
+            Some((src, dest)) => crate::animations::windowed::render(
+                &anim_kind, &self.d2d, &curr_bmp, &next_bmp, src, dest, t, direction, sw, sh,
+            ),
+            None => anim_kind.render(&self.d2d, &curr_bmp, &next_bmp, t, direction, sw, sh),
+        };
+
         // 2. Pre-render initial frame 0 to D2D surface before window is shown (Zero white screen!)
         self.d2d.begin_draw();
         if let Some(ref bg) = bg_bmp {
@@ -335,14 +368,15 @@ impl OverlayWindow {
         } else {
             self.d2d.clear(0.04, 0.05, 0.08, 1.0);
         }
-        anim_kind.render(&self.d2d, &curr_bmp, &next_bmp, 0.0, direction, sw, sh);
+        draw_transition(0.0);
         let _ = self.d2d.end_draw();
 
         // 3. Now reveal window cleanly (click-through during transitions)
         self.show(false);
 
         let start_time = Instant::now();
-        let target_duration = Duration::from_secs_f32(duration_secs.max(0.12));
+        let target_duration =
+            Duration::from_secs_f32(duration_secs.max(0.12) * anim_kind.duration_scale());
         let mut cancelled = false;
 
         // 120Hz/144Hz frame loop
@@ -388,7 +422,7 @@ impl OverlayWindow {
             }
 
             // 2. Render animation
-            anim_kind.render(&self.d2d, &curr_bmp, &next_bmp, eased_t, direction, sw, sh);
+            draw_transition(eased_t);
 
             let _ = self.d2d.end_draw();
 
@@ -467,6 +501,8 @@ impl OverlayWindow {
             "hero" => Box::new(HeroLayout::default()),
             "expose_cloud" => Box::new(ExposeCloudLayout::default()),
             "spotlight" => Box::new(SpotlightLayout::default()),
+            "orbit" => Box::new(crate::layouts::orbit::OrbitLayout::default()),
+            "honeycomb" => Box::new(crate::layouts::honeycomb::HoneycombLayout::default()),
             _ => {
                 let mut dock = DockLayout::default();
                 // Settings slider range is 1.2-2.6; guard against hand-edited files.
@@ -543,12 +579,19 @@ impl OverlayWindow {
             .collect();
 
         let initial = initial_idx.min(windows.len() - 1);
-        let mut spring = Spring::new(initial as f64, SpringConfig::SNAPPY);
+        // The spring tracks a position in the layout's navigation order, which
+        // need not match window order (e.g. Honeycomb reads row by row).
+        let initial_pos = layout
+            .visible_indices(&windows)
+            .iter()
+            .position(|&i| i == initial)
+            .unwrap_or(0);
+        let mut spring = Spring::new(initial_pos as f64, SpringConfig::SNAPPY);
         let mut selected = initial;
 
         // Relative touchpad navigation state
         let mut fnav_base_x: Option<f64> = None;
-        let mut fnav_base_focus: f64 = initial as f64;
+        let mut fnav_base_focus: f64 = initial_pos as f64;
         let mut fnav_armed = false;
 
         let mut commit_selection = false;
@@ -751,8 +794,20 @@ impl OverlayWindow {
                         should_exit = true;
                         commit_selection = !candidates.is_empty();
                     }
-                    0x25 | 0x26 => step -= 1, // Left, Up
-                    0x27 | 0x28 => step += 1, // Right, Down
+                    0x25 => step -= 1, // Left
+                    0x27 => step += 1, // Right
+                    0x26 | 0x28 => {
+                        // Up / Down: to the row above or below in layouts
+                        // with rows, otherwise the same as Left / Right.
+                        let dir = if vk == 0x26 { -1 } else { 1 };
+                        match layout
+                            .step_vertical(selected, dir, &windows)
+                            .and_then(|idx| candidates.iter().position(|&c| c == idx))
+                        {
+                            Some(pos) => jump_to = Some(pos),
+                            None => step += dir,
+                        }
+                    }
                     0x24 => jump_to = Some(0), // Home
                     0x23 => jump_to = Some(candidates.len().saturating_sub(1)), // End
                     0x31..=0x39 => {
