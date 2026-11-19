@@ -269,7 +269,12 @@ impl OverlayWindow {
         // Play the transition on the monitor of the window being left.
         let area = unsafe {
             let fg = GetForegroundWindow();
-            if fg.0.is_null() || crate::window::foreground::is_own_window(fg) {
+            if fg.0.is_null()
+                || crate::window::foreground::is_own_window(fg)
+                || !crate::window::enumerator::is_alt_tab_window(fg)
+            {
+                // Desktop/taskbar focused: use the monitor under the cursor,
+                // matching the screen snapshot used as the "from" frame.
                 work_area()
             } else {
                 window_work_area(fg)

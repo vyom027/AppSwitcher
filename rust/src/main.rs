@@ -36,7 +36,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_MENU,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DisableProcessWindowsGhosting, DispatchMessageW, GetMessageW, IsWindow, MessageBoxW,
+    DisableProcessWindowsGhosting, DispatchMessageW, GetForegroundWindow, GetMessageW, IsIconic,
+    IsWindow, MessageBoxW,
     PeekMessageW, PostMessageW, PostQuitMessage, TranslateMessage, MB_ICONERROR, MB_OK, MSG,
     PM_REMOVE,
 };
@@ -93,6 +94,73 @@ fn signal_existing_instance() {
     }
 }
 
+/// Whether `mru[0]` is the window the user is actually in. It isn't when the
+/// desktop or taskbar has focus, or when the most recent window is minimized;
+/// then switching should go *to* `mru[0]` rather than past it.
+fn first_is_current(mru: &[WindowInfo]) -> bool {
+    mru.first().is_some_and(|w| unsafe {
+        GetForegroundWindow() == w.hwnd && !IsIconic(w.hwnd).as_bool()
+    })
+}
+
+/// Index of the window one step in `direction` (+1 next / -1 previous) from
+/// where the user is now, or `None` when there is nothing to switch to.
+fn switch_target(mru: &[WindowInfo], direction: i32) -> Option<usize> {
+    target_index(mru.len(), first_is_current(mru), direction)
+}
+
+/// Pure core of `switch_target`: `count` windows in MRU order, `current`
+/// says whether the user is in the first one.
+fn target_index(count: usize, current: bool, direction: i32) -> Option<usize> {
+    match (count, current) {
+        (0, _) => None,
+        (1, true) => None, // only the window you're already in
+        (_, true) => Some(if direction > 0 { 1 } else { count - 1 }),
+        (_, false) if direction > 0 => Some(0),
+        (_, false) => Some(count - 1),
+    }
+}
+
+#[cfg(test)]
+mod switch_target_tests {
+    use super::target_index;
+
+    #[test]
+    fn single_window_you_are_not_in_is_reachable() {
+        // e.g. the only app is minimized or the desktop has focus
+        assert_eq!(target_index(1, false, 1), Some(0));
+        assert_eq!(target_index(1, false, -1), Some(0));
+    }
+
+    #[test]
+    fn single_window_you_are_in_has_no_target() {
+        assert_eq!(target_index(1, true, 1), None);
+        assert_eq!(target_index(0, false, 1), None);
+    }
+
+    #[test]
+    fn from_the_desktop_forward_goes_to_most_recent() {
+        assert_eq!(target_index(3, false, 1), Some(0));
+        assert_eq!(target_index(3, false, -1), Some(2));
+    }
+
+    #[test]
+    fn from_a_window_steps_past_it() {
+        assert_eq!(target_index(3, true, 1), Some(1));
+        assert_eq!(target_index(3, true, -1), Some(2));
+    }
+}
+
+/// Snapshot of what is on screen now (e.g. the desktop), used as the
+/// "from" frame when switching from no window into one.
+fn grab_current_screen() -> Option<ImageBuffer> {
+    let (x, y, w, h) = window::capture::work_area();
+    window::capture::grab_screen_rect(x, y, w, h)
+}
+
+/// Activate `mru[sel]` with the configured transition. `opt_curr_img` is the
+/// frame to animate from: `mru[0]` when the user is in it, otherwise a
+/// screen snapshot taken before any picker was shown.
 fn commit_window_switch(
     overlay: &OverlayWindow,
     settings: &parking_lot::RwLock<Settings>,
@@ -101,8 +169,13 @@ fn commit_window_switch(
     opt_curr_img: Option<ImageBuffer>,
     opt_next_img: Option<ImageBuffer>,
 ) {
-    if sel == 0 || sel >= mru.len() {
-        bring_to_front(mru[0].hwnd);
+    let Some(target) = mru.get(sel) else {
+        return;
+    };
+    let current = first_is_current(mru);
+    if current && sel == 0 {
+        // Picked the window you're already in.
+        bring_to_front(target.hwnd);
         nudge_cursor();
         return;
     }
@@ -112,23 +185,27 @@ fn commit_window_switch(
         (cfg.animation.clone(), cfg.duration as f32)
     };
     let anim_kind = TransitionKind::from_str(&anim_name);
-    let curr_hwnd = mru[0].hwnd;
-    let target_hwnd = mru[sel].hwnd;
+    let target_hwnd = target.hwnd;
 
     // Skip the transition when motion is turned off (opt-in, see
     // `respect_system_animations`), or when the current window was closed
     // from the picker (nothing to animate from).
-    if !animations::motion_allowed() || !unsafe { IsWindow(curr_hwnd) }.as_bool() {
+    if !animations::motion_allowed() || (current && !unsafe { IsWindow(mru[0].hwnd) }.as_bool()) {
         bring_to_front(target_hwnd);
         nudge_cursor();
         return;
     }
 
-    let curr_img = opt_curr_img.or_else(|| capture_window_image(curr_hwnd));
+    let curr_img = if current {
+        opt_curr_img.or_else(|| capture_window_image(mru[0].hwnd))
+    } else {
+        opt_curr_img.or_else(grab_current_screen)
+    };
     let next_img = opt_next_img.or_else(|| capture_window_image(target_hwnd));
 
     if let (Some(c), Some(n)) = (curr_img, next_img) {
-        let dir = if sel == 1 { 1 } else { -1 };
+        let forward = if current { sel == 1 } else { sel == 0 };
+        let dir = if forward { 1 } else { -1 };
         overlay.run_switch_transition(dir, &c, &n, target_hwnd, anim_kind, duration, true);
     } else {
         bring_to_front(target_hwnd);
@@ -164,10 +241,19 @@ unsafe fn handle_alt_tab(
         };
         mru.retain(|w| app_identity(w.hwnd).as_deref() == Some(app.as_str()));
     }
-    if mru.len() < 2 {
+    if mru.is_empty() {
         return;
     }
-    let start_idx = if direction > 0 { 1 } else { mru.len() - 1 };
+    // With a single window that you're already in there is nothing to switch
+    // to, but the picker still opens (showing it) if Alt is held.
+    let start_idx = switch_target(&mru, direction).unwrap_or(0);
+    // When no window is active (desktop focused, or the window minimized),
+    // animate from what's on screen now, captured before the picker shows.
+    let screen = if first_is_current(&mru) {
+        None
+    } else {
+        grab_current_screen()
+    };
 
     // Quick tap (<100ms, matching native Windows behaviour): switch
     // immediately without flashing the picker.
@@ -200,7 +286,7 @@ unsafe fn handle_alt_tab(
     }
 
     if quick_tap {
-        commit_window_switch(overlay, settings, &mru, start_idx, None, None);
+        commit_window_switch(overlay, settings, &mru, start_idx, screen, None);
         return;
     }
 
@@ -215,7 +301,8 @@ unsafe fn handle_alt_tab(
         dock_mag,
         event_rx,
     ) {
-        commit_window_switch(overlay, settings, &mru, sel, c_img, n_img);
+        let from = if screen.is_some() { screen } else { c_img };
+        commit_window_switch(overlay, settings, &mru, sel, from, n_img);
     }
 }
 
@@ -413,7 +500,12 @@ fn main() {
                                 )
                             };
                             let mru = sort_by_mru(get_open_windows(&blocklist, false));
-                            if mru.len() >= 2 {
+                            if !mru.is_empty() {
+                                let screen = if first_is_current(&mru) {
+                                    None
+                                } else {
+                                    grab_current_screen()
+                                };
                                 let accent = accent_color(accent_rgb);
                                 if let Some((sel, c_img, n_img)) = overlay.run_picker(
                                     &mru,
@@ -426,8 +518,9 @@ fn main() {
                                     dock_mag,
                                     &event_rx,
                                 ) {
+                                    let from = if screen.is_some() { screen } else { c_img };
                                     commit_window_switch(
-                                        &overlay, &settings, &mru, sel, c_img, n_img,
+                                        &overlay, &settings, &mru, sel, from, n_img,
                                     );
                                 }
                             }
@@ -472,7 +565,12 @@ fn main() {
                                 )
                             };
                             let mru = sort_by_mru(get_open_windows(&blocklist, false));
-                            if mru.len() >= 2 {
+                            if !mru.is_empty() {
+                                let screen = if first_is_current(&mru) {
+                                    None
+                                } else {
+                                    grab_current_screen()
+                                };
                                 let accent = accent_color(accent_rgb);
                                 if let Some((sel, c_img, n_img)) = overlay.run_picker(
                                     &mru,
@@ -485,8 +583,9 @@ fn main() {
                                     dock_mag,
                                     &event_rx,
                                 ) {
+                                    let from = if screen.is_some() { screen } else { c_img };
                                     commit_window_switch(
-                                        &overlay, &settings, &mru, sel, c_img, n_img,
+                                        &overlay, &settings, &mru, sel, from, n_img,
                                     );
                                 }
                             }
@@ -512,13 +611,13 @@ fn main() {
                                 )
                             };
                             let mru = sort_by_mru(get_open_windows(&blocklist, false));
-                            if mru.len() < 2 {
-                                // Exactly 1 window or none: no switch, zero change
+                            let Some(target_idx) = switch_target(&mru, direction) else {
+                                // No windows, or only the one you're already in.
                                 continue;
-                            }
+                            };
+                            let current = first_is_current(&mru);
 
                             let anim_kind = TransitionKind::from_str(&anim_name);
-                            let target_idx = if direction > 0 { 1 } else { mru.len() - 1 };
                             let curr_hwnd = mru[0].hwnd;
                             let target_hwnd = mru[target_idx].hwnd;
 
@@ -528,7 +627,13 @@ fn main() {
                                 continue;
                             }
 
-                            let curr_img = capture_window_image(curr_hwnd);
+                            // From the active window, or from the desktop when
+                            // no window is active (e.g. the only app is minimized).
+                            let curr_img = if current {
+                                capture_window_image(curr_hwnd)
+                            } else {
+                                grab_current_screen()
+                            };
                             let next_img = capture_window_image(target_hwnd);
 
                             if let (Some(c), Some(n)) = (curr_img, next_img) {
