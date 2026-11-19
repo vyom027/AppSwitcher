@@ -55,6 +55,16 @@ pub fn is_alt_tab_window(hwnd: HWND) -> bool {
             return false;
         }
 
+        // Check ownership before reading the title: for a window of our own
+        // process, GetWindowText *sends* WM_GETTEXT to the owning thread. From
+        // a background thread that blocks until the UI thread answers, which
+        // deadlocked the app when the UI thread was itself waiting on us.
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == GetCurrentProcessId() {
+            return false;
+        }
+
         let len = GetWindowTextLengthW(hwnd);
         if len <= 0 {
             return false;
@@ -68,12 +78,6 @@ pub fn is_alt_tab_window(hwnd: HWND) -> bool {
         let title = String::from_utf16_lossy(&buf[..read as usize]);
 
         if title == "Program Manager" || title == "Windows Input Experience" {
-            return false;
-        }
-
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == GetCurrentProcessId() {
             return false;
         }
 
@@ -113,10 +117,9 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
 
 pub fn get_open_windows(blocklist: &[String], force_refresh: bool) -> Vec<WindowInfo> {
     let now = Instant::now();
-    let mut cache = CACHE.lock();
 
     if !force_refresh {
-        if let Some((ts, ref data)) = *cache {
+        if let Some((ts, ref data)) = *CACHE.lock() {
             if now.duration_since(ts) < CACHE_TTL {
                 return data
                     .iter()
@@ -127,6 +130,9 @@ pub fn get_open_windows(blocklist: &[String], force_refresh: bool) -> Vec<Window
         }
     }
 
+    // Enumerate without holding the cache lock: both the UI thread and the
+    // input thread (gesture prewarm) call this, and neither may ever wait on
+    // the other while it is inside EnumWindows.
     let mut windows = Vec::new();
     unsafe {
         let _ = EnumWindows(
@@ -135,7 +141,7 @@ pub fn get_open_windows(blocklist: &[String], force_refresh: bool) -> Vec<Window
         );
     }
 
-    *cache = Some((now, windows.clone()));
+    *CACHE.lock() = Some((now, windows.clone()));
 
     windows
         .into_iter()

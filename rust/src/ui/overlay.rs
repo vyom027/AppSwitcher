@@ -265,6 +265,13 @@ impl OverlayWindow {
         duration_secs: f32,
         commit_focus: bool,
     ) {
+        if next_img.placeholder {
+            if commit_focus {
+                bring_to_front(next_hwnd);
+                nudge_cursor();
+            }
+            return;
+        }
         let _guard = OverlayGuard(self);
         // Play the transition on the monitor of the window being left.
         let area = unsafe {
@@ -522,10 +529,13 @@ impl OverlayWindow {
         let hwnds: Vec<HWND> = windows.iter().map(|w| w.hwnd).collect();
         let mut raw_images = capture_windows_parallel(&hwnds);
 
+        // Thumbnails show just the window (not the full-screen canvas a
+        // non-maximized window is captured on); failed captures get none, so
+        // layouts show the app icon instead of a dark tile.
         let mut bitmaps: Vec<Option<ID2D1Bitmap>> = raw_images
             .iter()
             .map(|opt_img| {
-                opt_img.as_ref().and_then(|img| {
+                opt_img.as_ref().and_then(|img| img.window_only()).and_then(|img| {
                     self.d2d
                         .create_bitmap_from_rgba(img.width, img.height, &img.pixels)
                         .ok()
@@ -741,10 +751,12 @@ impl OverlayWindow {
                     continue;
                 };
                 if has_visible_content(&img) {
-                    if let Ok(bmp) =
+                    let thumb = img.window_only().and_then(|t| {
                         self.d2d
-                            .create_bitmap_from_rgba(img.width, img.height, &img.pixels)
-                    {
+                            .create_bitmap_from_rgba(t.width, t.height, &t.pixels)
+                            .ok()
+                    });
+                    if let Some(bmp) = thumb {
                         bitmaps[idx] = Some(bmp);
                         raw_images[idx] = Some(img);
                     }

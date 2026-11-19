@@ -165,13 +165,15 @@ impl PickerLayout for HoneycombLayout {
                 d2d.fill_geometry(&shadow, style::rgba(0.0, 0.0, 0.0, 0.25 + 0.15 * swell));
             }
             d2d.fill_geometry(&hex, style::THUMB_BG);
+            let has_thumb = matches!(bitmaps.get(i), Some(Some(_)));
             if let Some(Some(bmp)) = bitmaps.get(i) {
-                // Fill the hexagon edge to edge: full height, centred, sides
-                // cropped (the middle of a window is the recognisable part).
+                // Show most of the window: a little wider than the hexagon,
+                // so only the edges are trimmed; short windows leave a band
+                // above and below, tall ones are trimmed top and bottom.
                 let size = unsafe { bmp.GetSize() };
                 let aspect = if size.height > 0.0 { size.width / size.height } else { 1.6 };
-                let h = rr * 2.0;
-                let w = h * aspect.max(SQRT3 * 0.5);
+                let w = SQRT3 * rr * 1.3;
+                let h = w / aspect.max(0.3);
                 let dest = D2D_RECT_F {
                     left: x - w * 0.5,
                     top: y - h * 0.5,
@@ -183,10 +185,14 @@ impl PickerLayout for HoneycombLayout {
                     d2d.fill_geometry_with(&hex, &brush);
                 }
             }
-            // App icon near the bottom of the tile, on its own backing tile.
+            // App icon near the bottom of the tile, on its own backing tile;
+            // large and centred when there's no preview to show.
             if let Some(Some(icon)) = icons.get(i) {
-                let s = (rr * 0.42).clamp(18.0, 40.0);
-                let icy = y + rr * 0.52;
+                let (s, icy) = if has_thumb {
+                    ((rr * 0.42).clamp(18.0, 40.0), y + rr * 0.52)
+                } else {
+                    ((rr * 0.62).clamp(28.0, 64.0), y)
+                };
                 style::icon_tile(
                     d2d,
                     icon,

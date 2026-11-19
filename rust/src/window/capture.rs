@@ -31,6 +31,40 @@ pub struct ImageBuffer {
     /// image is a non-maximized window placed on a work-area-sized canvas.
     /// `None` means the whole image is the window / screen.
     pub content: Option<(i32, i32, i32, i32)>,
+    /// True when capture failed and this is a plain stand-in image.
+    pub placeholder: bool,
+}
+
+impl ImageBuffer {
+    /// Just the window: crops a window placed on a full-screen canvas down to
+    /// the window itself (for thumbnails). Returns `None` for placeholders.
+    pub fn window_only(&self) -> Option<ImageBuffer> {
+        if self.placeholder {
+            return None;
+        }
+        let Some((x, y, w, h)) = self.content else {
+            return Some(self.clone());
+        };
+        let (x, y) = (x.max(0) as usize, y.max(0) as usize);
+        let w = (w.max(0) as usize).min(self.width as usize - x.min(self.width as usize));
+        let h = (h.max(0) as usize).min(self.height as usize - y.min(self.height as usize));
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let stride = self.width as usize * 4;
+        let mut pixels = Vec::with_capacity(w * h * 4);
+        for row in y..y + h {
+            let start = row * stride + x * 4;
+            pixels.extend_from_slice(&self.pixels[start..start + w * 4]);
+        }
+        Some(ImageBuffer {
+            width: w as u32,
+            height: h as u32,
+            pixels,
+            content: None,
+            placeholder: false,
+        })
+    }
 }
 
 /// Work area (x, y, w, h) of the monitor under the mouse cursor. The picker
@@ -353,6 +387,7 @@ pub fn capture_frosted_backdrop(wx: i32, wy: i32, ww: i32, wh: i32) -> ImageBuff
                 height: bh,
                 pixels: raw_pixels,
                 content: None,
+                placeholder: false,
             };
         }
     }
@@ -370,6 +405,7 @@ pub fn capture_frosted_backdrop(wx: i32, wy: i32, ww: i32, wh: i32) -> ImageBuff
         height: bh,
         pixels: fallback,
         content: None,
+        placeholder: false,
     }
 }
 
@@ -434,6 +470,32 @@ pub fn prewarm_windows(hwnds: &[HWND]) {
     });
 }
 
+/// True when `hwnd` is the top-level window under most sample points of
+/// `rect` (centre and four inset corners), i.e. its pixels are on screen.
+fn is_unobscured(hwnd: HWND, rect: RECT) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
+    let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
+    if w <= 0 || h <= 0 {
+        return false;
+    }
+    let (ix, iy) = (w / 6, h / 6);
+    let points = [
+        (rect.left + w / 2, rect.top + h / 2),
+        (rect.left + ix, rect.top + iy),
+        (rect.right - ix, rect.top + iy),
+        (rect.left + ix, rect.bottom - iy),
+        (rect.right - ix, rect.bottom - iy),
+    ];
+    let visible = points
+        .iter()
+        .filter(|&&(x, y)| unsafe {
+            let at = WindowFromPoint(POINT { x, y });
+            !at.0.is_null() && GetAncestor(at, GA_ROOT) == hwnd
+        })
+        .count();
+    visible >= 4
+}
+
 pub fn create_placeholder(_title: &str, width: u32, height: u32) -> ImageBuffer {
     let mut pixels = vec![0u8; (width * height * 4) as usize];
     for chunk in pixels.chunks_exact_mut(4) {
@@ -448,6 +510,7 @@ pub fn create_placeholder(_title: &str, width: u32, height: u32) -> ImageBuffer 
         height,
         pixels,
         content: None,
+        placeholder: true,
     }
 }
 
@@ -514,6 +577,7 @@ pub fn grab_screen_rect(x: i32, y: i32, w: i32, h: i32) -> Option<ImageBuffer> {
                 height: h as u32,
                 pixels: raw_pixels,
                 content: None,
+                placeholder: false,
             })
         } else {
             None
@@ -553,6 +617,7 @@ fn crop_inner(
         height: crop_h,
         pixels: out,
         content: None,
+        placeholder: false,
     }
 }
 
@@ -598,6 +663,7 @@ fn compose_over_backdrop(win: &ImageBuffer, dx: i32, dy: i32, ww: u32, wh: u32) 
             let bottom = (dy + win_h).min(wh as i32);
             (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
         },
+        placeholder: false,
     }
 }
 
@@ -782,6 +848,7 @@ pub fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
                             height: h as u32,
                             pixels: raw_pixels,
                             content: None,
+                            placeholder: false,
                         };
 
                         if is_maximized {
@@ -814,7 +881,14 @@ pub fn capture_window_image_uncached(hwnd: HWND) -> Option<ImageBuffer> {
         // returning an all-black bitmap. When the window is actually visible,
         // fall back to its current desktop pixels rather than showing a black
         // preview. This path runs before the switcher overlay is revealed.
-        if !is_iconic && IsWindowVisible(hwnd).as_bool() {
+        // Never while our overlay is up (we'd capture the picker itself), and
+        // only if the window is really what's on screen at its position —
+        // otherwise we'd show whatever window is covering it.
+        if !is_iconic
+            && IsWindowVisible(hwnd).as_bool()
+            && !OVERLAY_VISIBLE.load(std::sync::atomic::Ordering::Relaxed)
+            && is_unobscured(hwnd, rect)
+        {
             let screen = grab_screen_rect(rect.left, rect.top, w, h);
             if let Some(img) = screen {
                 let has_content = img
@@ -905,4 +979,39 @@ pub fn capture_windows_parallel(hwnds: &[HWND]) -> Vec<Option<ImageBuffer>> {
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ImageBuffer;
+
+    fn image(w: u32, h: u32, content: Option<(i32, i32, i32, i32)>) -> ImageBuffer {
+        // Each pixel's red channel encodes its index so crops are checkable.
+        let pixels = (0..w * h).flat_map(|i| [i as u8, 0, 0, 255]).collect();
+        ImageBuffer {
+            width: w,
+            height: h,
+            pixels,
+            content,
+            placeholder: false,
+        }
+    }
+
+    #[test]
+    fn window_only_crops_to_the_window() {
+        let img = image(4, 3, Some((1, 1, 2, 2)));
+        let crop = img.window_only().unwrap();
+        assert_eq!((crop.width, crop.height), (2, 2));
+        let reds: Vec<u8> = crop.pixels.chunks(4).map(|p| p[0]).collect();
+        assert_eq!(reds, vec![5, 6, 9, 10]);
+    }
+
+    #[test]
+    fn window_only_keeps_full_frames_and_drops_placeholders() {
+        let full = image(2, 2, None);
+        assert_eq!(full.window_only().unwrap().pixels, full.pixels);
+        let mut placeholder = image(2, 2, None);
+        placeholder.placeholder = true;
+        assert!(placeholder.window_only().is_none());
+    }
 }
